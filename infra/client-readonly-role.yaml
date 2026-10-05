@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Read-only IAM role that lets the savings tool read cost, usage and commitment data.
+  Deploy in the client's payer (management) account. The role can be assumed only by
+  the tool's AWS account and only with the ExternalId issued for this client.
+
+Parameters:
+  ToolAccountId:
+    Type: String
+    Description: AWS account ID that hosts the savings tool.
+    AllowedPattern: "^\\d{12}$"
+  ExternalId:
+    Type: String
+    Description: ExternalId issued by the savings tool for this client connection.
+    MinLength: 16
+    MaxLength: 256
+    NoEcho: true
+  RoleName:
+    Type: String
+    Default: SavingsToolReadOnly
+  CurBucketName:
+    Type: String
+    Default: ""
+    Description: Optional. S3 bucket holding the Cost and Usage Report (CUR 2.0 / Data Exports).
+
+Conditions:
+  HasCurBucket: !Not [!Equals [!Ref CurBucketName, ""]]
+
+Resources:
+  SavingsToolRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${ToolAccountId}:root"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      Policies:
+        - PolicyName: SavingsToolCostAndCommitmentsRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CostExplorerRead
+                Effect: Allow
+                Action:
+                  - ce:Get*
+                  - ce:Describe*
+                  - ce:List*
+                Resource: "*"
+              - Sid: CommitmentsRead
+                Effect: Allow
+                Action:
+                  - savingsplans:Describe*
+                  - savingsplans:List*
+                  - ec2:DescribeReservedInstances
+                  - ec2:DescribeReservedInstancesModifications
+                  - ec2:DescribeRegions
+                  - rds:DescribeReservedDBInstances
+                  - elasticache:DescribeReservedCacheNodes
+                  - redshift:DescribeReservedNodes
+                  - es:DescribeReservedInstances
+                  - memorydb:DescribeReservedNodes
+                Resource: "*"
+              - Sid: OrganizationRead
+                Effect: Allow
+                Action:
+                  - organizations:DescribeOrganization
+                  - organizations:ListAccounts
+                  - organizations:DescribeAccount
+                  - cur:DescribeReportDefinitions
+                  - bcm-data-exports:ListExports
+                  - bcm-data-exports:GetExport
+                Resource: "*"
+        - !If
+          - HasCurBucket
+          - PolicyName: SavingsToolCurBucketRead
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:ListBucket
+                    - s3:GetBucketLocation
+                  Resource:
+                    - !Sub "arn:${AWS::Partition}:s3:::${CurBucketName}"
+                    - !Sub "arn:${AWS::Partition}:s3:::${CurBucketName}/*"
+          - !Ref AWS::NoValue
+
+Outputs:
+  RoleArn:
+    Description: Paste this into the savings tool when adding the AWS connection.
+    Value: !GetAtt SavingsToolRole.Arn
