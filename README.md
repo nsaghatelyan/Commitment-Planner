@@ -15,7 +15,7 @@ backend/            Python 3.12, FastAPI
   tests/
 frontend/           Next.js (App Router, TypeScript)
 infra/              CloudFormation for the client's read-only IAM role (with ExternalId)
-docker-compose.yml  Postgres 16 and Redis 7 for local development
+docker-compose.yml  Postgres 16 (localhost:5433) and Redis 7 (localhost:6380) for local development
 ```
 
 ## Prerequisites
@@ -31,6 +31,9 @@ Start Postgres and Redis:
 ```sh
 docker compose up -d
 ```
+
+They are published on 5433 and 6380 rather than the default ports so they don't collide with a
+locally installed Postgres or Redis.
 
 Backend:
 
