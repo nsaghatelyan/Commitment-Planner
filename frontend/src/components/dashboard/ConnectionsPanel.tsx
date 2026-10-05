@@ -43,7 +43,7 @@ function CostNote() {
 function AddConnection({ tenantId, onCreated }: { tenantId: string; onCreated: () => void }) {
   const [provider, setProvider] = useState<"aws" | "azure">("aws");
   const [mode, setMode] = useState<"profile" | "role">("profile");
-  const [form, setForm] = useState<Record<string, string>>({ name: "", aws_profile: "default" });
+  const [form, setForm] = useState<Record<string, string>>({ name: "", aws_profile: "" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -58,7 +58,7 @@ function AddConnection({ tenantId, onCreated }: { tenantId: string; onCreated: (
             provider,
             name: form.name,
             aws_auth_mode: mode,
-            aws_profile: mode === "profile" ? form.aws_profile : null,
+            aws_profile: mode === "profile" ? form.aws_profile?.trim() || null : null,
             aws_role_arn: mode === "role" ? form.aws_role_arn || null : null,
             aws_export_bucket: form.aws_export_bucket || null,
             aws_export_prefix: form.aws_export_prefix || null,
@@ -75,7 +75,7 @@ function AddConnection({ tenantId, onCreated }: { tenantId: string; onCreated: (
           };
     try {
       await api.createConnection(tenantId, body);
-      setForm({ name: "", aws_profile: "default" });
+      setForm({ name: "", aws_profile: "" });
       onCreated();
     } catch (err) {
       setError((err as Error).message);
@@ -115,7 +115,10 @@ function AddConnection({ tenantId, onCreated }: { tenantId: string; onCreated: (
             <TextInput required value={form.name} onChange={set("name")} placeholder="e.g. My account" />
           </Field>
           {provider === "aws" && mode === "profile" && (
-            <Field label="AWS CLI profile" hint="From ~/.aws/config on the machine running the API. Leave empty for the default credential chain.">
+            <Field
+              label="Credentials profile (optional)"
+              hint="Leave empty to use the [default] profile in ~/.aws/credentials (the default credential chain)."
+            >
               <TextInput value={form.aws_profile ?? ""} onChange={set("aws_profile")} placeholder="default" />
             </Field>
           )}
@@ -162,12 +165,74 @@ function AddConnection({ tenantId, onCreated }: { tenantId: string; onCreated: (
             </>
           )}
         </div>
+        {provider === "aws" && mode === "profile" && <ConsoleCredentialsHelp />}
         {error && <p className="text-[12px] text-critical">{error}</p>}
         <Button type="submit" variant="primary" disabled={busy || !form.name.trim()}>
           <Plus className="h-3.5 w-3.5" /> Add connection
         </Button>
       </form>
     </Card>
+  );
+}
+
+const READ_ONLY_POLICY = JSON.stringify(
+  {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Action: [
+          "ce:GetCostAndUsage", "ce:GetDimensionValues", "ce:GetReservationUtilization",
+          "ce:GetReservationPurchaseRecommendation", "ce:GetSavingsPlansUtilizationDetails",
+          "ce:GetSavingsPlansPurchaseRecommendation", "savingsplans:DescribeSavingsPlans",
+          "savingsplans:DescribeSavingsPlansOfferingRates", "ec2:DescribeRegions",
+          "ec2:DescribeReservedInstances", "rds:DescribeReservedDBInstances",
+          "elasticache:DescribeReservedCacheNodes", "redshift:DescribeReservedNodes",
+          "es:DescribeReservedInstances", "memorydb:DescribeReservedNodes",
+          "organizations:DescribeOrganization", "organizations:ListAccounts", "pricing:GetProducts",
+          "s3:ListBucket", "s3:GetObject",
+        ],
+        Resource: "*",
+      },
+    ],
+  },
+  null,
+  2,
+);
+
+function ConsoleCredentialsHelp() {
+  return (
+    <details className="rounded-lg border border-border p-3 text-[12.5px]" open>
+      <summary className="cursor-pointer font-semibold text-text">Set up credentials in the AWS console (no AWS CLI needed)</summary>
+      <ol className="mt-2 list-decimal space-y-1 pl-5 text-text-2">
+        <li>
+          <b>IAM → Users → Create user</b> (e.g. <code>savings-tool-test</code>), without console access.
+        </li>
+        <li>
+          <b>Attach policies directly → Create policy → JSON</b>: paste this read-only policy, save it, and attach it to the
+          user.
+          <details className="mt-1">
+            <summary className="cursor-pointer text-accent">Show policy</summary>
+            <div className="mt-1">
+              <CodeBlock code={READ_ONLY_POLICY} />
+            </div>
+          </details>
+        </li>
+        <li>
+          Open the user → <b>Security credentials → Create access key</b> → use case &ldquo;Application running outside AWS&rdquo;.
+          Copy both keys (the secret is shown once).
+        </li>
+        <li>
+          On the machine running the tool, create the text file <code>~/.aws/credentials</code> with:
+          <CodeBlock code={"[default]\naws_access_key_id = <Access key ID>\naws_secret_access_key = <Secret access key>"} />
+          Use a different section name (e.g. <code>[savings-tool]</code>) and enter it above if you already have a default.
+        </li>
+        <li>
+          Make sure <b>Billing and Cost Management → Cost Explorer</b> is enabled (new accounts need up to 24 hours for data).
+        </li>
+        <li>Restart the worker so it picks up the file. Keys are never stored by the tool; delete the access key when you finish testing.</li>
+      </ol>
+    </details>
   );
 }
 
@@ -268,7 +333,9 @@ function ConnectionCard({ conn, onChange, onCollected }: { conn: Connection; onC
               : conn.provider === "aws"
               ? role
                 ? `cross-account role${conn.aws_role_arn ? ` ${conn.aws_role_arn}` : " (not set yet)"}`
-                : `local profile "${conn.aws_profile ?? "default"}"`
+                : conn.aws_profile
+                  ? `local profile "${conn.aws_profile}"`
+                  : "default credentials on this machine"
               : `${conn.azure_agreement_type?.toUpperCase()} · ${conn.azure_billing_scope}`}
             {conn.aws_export_bucket && ` · export s3://${conn.aws_export_bucket}/${conn.aws_export_prefix ?? ""}`}
           </div>
@@ -306,16 +373,52 @@ function ConnectionCard({ conn, onChange, onCollected }: { conn: Connection; onC
         {synthetic && <Callout title="Synthetic connection">Demo data generated by the tool; it cannot be tested or collected.</Callout>}
         {role && (
           <div className="space-y-3 rounded-lg border border-border p-4">
-            <div className="text-[13px] font-semibold">1. Deploy the read-only role in the account to analyse</div>
-            <p className="text-[12.5px] text-text-2">
-              Run this with credentials for that account (the payer account for an organization). Replace{" "}
-              <code>&lt;TOOL_ACCOUNT_ID&gt;</code> with the account the tool runs as — for a test on your own machine, your own account ID.
-              ExternalId: <code className="rounded bg-surface-2 px-1">{conn.aws_external_id}</code>
+            <div className="text-[13px] font-semibold">1. Create the read-only role in the AWS console</div>
+            <ol className="list-decimal space-y-1 pl-5 text-[12.5px] text-text-2">
+              <li>
+                <a href="/api/infra/client-readonly-role.yaml" className="inline-flex items-center gap-1 text-accent hover:underline">
+                  <Download className="h-3.5 w-3.5" /> Download the CloudFormation template
+                </a>
+              </li>
+              <li>
+                Sign in to the account to analyse (the payer account for an organization) and open <b>CloudFormation → Create stack →
+                With new resources</b>.
+              </li>
+              <li>
+                Choose <b>Upload a template file</b>, pick the downloaded file, and name the stack <code>savings-tool-readonly</code>.
+              </li>
+              <li>
+                Parameters: <b>ToolAccountId</b> = the account the tool runs as (for a test on your own machine, your own 12-digit
+                account ID) and <b>ExternalId</b> ={" "}
+                <code className="rounded bg-surface-2 px-1">{conn.aws_external_id}</code>
+                <button
+                  type="button"
+                  className="ml-1 text-[11px] text-accent hover:underline"
+                  onClick={() => navigator.clipboard?.writeText(conn.aws_external_id ?? "")}
+                >
+                  copy
+                </button>
+                . Leave the rest as is.
+              </li>
+              <li>
+                Tick <b>I acknowledge that AWS CloudFormation might create IAM resources with custom names</b>, then <b>Submit</b>.
+              </li>
+              <li>
+                When the stack shows CREATE_COMPLETE, open its <b>Outputs</b> tab and copy <b>RoleArn</b>.
+              </li>
+            </ol>
+            <p className="text-[12px] text-muted">
+              The tool assumes this role with the credentials on the machine running it, so those still need to be set up (see
+              &ldquo;Local AWS profile&rdquo; setup below).
             </p>
-            {conn.deploy_command && <CodeBlock code={conn.deploy_command} />}
-            <a href="/api/infra/client-readonly-role.yaml" className="inline-flex items-center gap-1 text-[12.5px] text-accent hover:underline">
-              <Download className="h-3.5 w-3.5" /> Download the CloudFormation template
-            </a>
+            {conn.deploy_command && (
+              <details className="text-[12.5px]">
+                <summary className="cursor-pointer text-text-2">Alternative: deploy with the AWS CLI</summary>
+                <div className="mt-2">
+                  <CodeBlock code={conn.deploy_command} />
+                </div>
+              </details>
+            )}
             <div className="text-[13px] font-semibold">2. Paste the RoleArn output</div>
             <div className="flex gap-2">
               <TextInput value={arn} onChange={(e) => setArn(e.target.value)} placeholder="arn:aws:iam::123456789012:role/SavingsToolReadOnly" />

@@ -73,10 +73,25 @@ cd backend && arq app.workers.main.WorkerSettings
 
 The API and the worker read AWS credentials from the machine they run on.
 
-**Local AWS profile** (simplest, for testing your own account): enter a profile name from
-`~/.aws/config` (or leave it empty for the default credential chain). With AWS SSO run
-`aws sso login --profile <name>` first. The profile needs these read-only permissions
-(an administrator already has them):
+**Local credentials** (simplest, for testing your own account; no AWS CLI needed):
+
+1. In the AWS console: **IAM → Users → Create user** (no console access) → **Attach policies
+   directly → Create policy → JSON**, paste the policy below, and attach it.
+2. Open the user → **Security credentials → Create access key** ("Application running
+   outside AWS"). Copy both keys; the secret is shown once.
+3. On the machine running the tool, create the text file `~/.aws/credentials`:
+
+   ```ini
+   [default]
+   aws_access_key_id = <Access key ID>
+   aws_secret_access_key = <Secret access key>
+   ```
+
+4. In the connection form leave **Credentials profile** empty (default credential chain), or use
+   another section name such as `[savings-tool]` and enter it there. Restart the worker after
+   creating the file. The tool never stores keys; delete the access key when you finish testing.
+
+The policy (read-only):
 
 ```json
 {
@@ -99,11 +114,20 @@ The API and the worker read AWS credentials from the machine they run on.
 }
 ```
 
-**Cross-account role** (how a real client connects): the tool generates an ExternalId and shows
-the `aws cloudformation deploy` command for `infra/client-readonly-role.yaml`. Run it in the
-account to analyse, with `ToolAccountId` set to the account whose credentials the tool runs
-with (for a test on your own machine: your own account ID; set `TOOL_AWS_ACCOUNT_ID` in
-`backend/.env` to have it filled in). Paste the `RoleArn` stack output into the connection.
+**Cross-account role** (how a real client connects): the tool generates an ExternalId. In the
+account to analyse, open **CloudFormation → Create stack → With new resources → Upload a
+template file**, choose `infra/client-readonly-role.yaml` (also downloadable from the
+connection card), and set **ToolAccountId** (the account whose credentials the tool runs with;
+for a test on your own machine, your own account ID) and **ExternalId** (from the UI).
+Acknowledge IAM resource creation, submit, and copy **RoleArn** from the stack's **Outputs**
+into the connection. The tool still needs local credentials (above) to assume the role.
+
+<details><summary>Alternative: deploy the role with the AWS CLI</summary>
+
+The connection card shows the exact `aws cloudformation deploy` command with your ExternalId;
+set `TOOL_AWS_ACCOUNT_ID` in `backend/.env` to have the tool account filled in.
+
+</details>
 
 Then **Test connection** (STS identity, one Cost Explorer call, account list) and **Collect
 data**. Without a Data Export, history comes from a 13-month Cost Explorer backfill (daily).

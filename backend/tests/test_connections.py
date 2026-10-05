@@ -202,6 +202,22 @@ def test_connection_lifecycle(client, db_session, monkeypatch):
         },
     ).json()
     assert prof["aws_profile"] == "default" and "deploy_command" not in prof
+    chain = client.post(
+        base,
+        json={
+            "provider": "aws",
+            "name": "default chain",
+            "aws_auth_mode": "profile",
+            "aws_profile": "  ",
+        },
+    ).json()
+    assert chain["aws_profile"] is None  # empty -> boto3 default credential chain
+    from app.config import get_settings
+    from app.services.collection import build_collector
+
+    conn = db_session.get(CloudConnection, uuid.UUID(chain["id"]))
+    collector = build_collector(conn, get_settings(), None)
+    assert collector.profile is None and collector.role_arn is None
 
     monkeypatch.setattr("app.services.connections.build_collector", lambda *a: FakeCollector())
     ok = client.post(f"/connections/{prof['id']}/test").json()
