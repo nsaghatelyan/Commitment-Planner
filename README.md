@@ -22,6 +22,46 @@ infra/              CloudFormation for the client's read-only IAM role (with Ext
 docker-compose.yml  Postgres 16 (localhost:5433) and Redis 7 (localhost:6380) for local development
 ```
 
+## Demo, end to end
+
+```sh
+docker compose up -d                                   # Postgres :5433, Redis :6380
+
+cd backend
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e '.[dev]'
+alembic upgrade head
+python -m app.synthetic --seed-db --analyze            # 4 synthetic clients, 3 risk profiles each (~2 min)
+uvicorn app.main:app --port 8000                       # API
+
+cd ../frontend                                         # in a second shell
+npm install
+npm run dev -- -p 3100                                 # UI: http://localhost:3100
+```
+
+The UI has no login or onboarding (it is a demo). Pick a client and risk profile in the header:
+
+- **Overview**: on-demand-equivalent spend, effective savings rate today vs after the plan,
+  projected savings, coverage, utilization of existing commitments, backtest accuracy, how
+  eligible usage was paid for (daily) and the spend split by service / cloud.
+- **Purchase plan**: the ordered plan (sortable, filterable by cloud and type, CSV / XLSX
+  export) with urgent renewals and stranded commitments called out. Click a row for the
+  detail: hourly baseline vs the commitment line (covered / on-demand / unused), full history
+  with the sizing window and step changes, percentiles and stability signals, the rationale,
+  1y / 3y and payment options, and the simulation for each risk profile.
+- **Engine vs native**: our plan against AWS / Azure's own recommendations, with the reasons.
+- **Existing commitments**: utilization over time; expiring, stranded, underutilized flagged.
+- **Not committed**: Spot, nightly, business-hours, too-new and migrated-away usage, and why.
+- **Backtest**: the engine re-run on data up to 30 days before the end, its plan replayed
+  against the 30 days it never saw: realized vs projected utilization and savings.
+
+Append `&theme=light` or `&theme=dark` to any URL to force a theme.
+
+![Overview](docs/screenshots/overview.png)
+![Purchase plan](docs/screenshots/purchase-plan.png)
+![Recommendation detail](docs/screenshots/recommendation-detail.png)
+![Backtest](docs/screenshots/backtest.png)
+
 ## Prerequisites
 
 - Python 3.12
@@ -57,7 +97,7 @@ Frontend:
 ```sh
 cd frontend
 npm install
-cp .env.example .env.local
+cp .env.example .env.local             # API_URL: where Next proxies /api/* to
 npm run dev                            # http://localhost:3000
 ```
 
@@ -65,7 +105,7 @@ npm run dev                            # http://localhost:3000
 
 ```sh
 cd backend && pytest && ruff check . && ruff format --check .   # DB tests need docker compose up
-cd frontend && npm run lint && npm run build
+cd frontend && npm run lint && npm test && npm run build
 ```
 
 ## Usage data

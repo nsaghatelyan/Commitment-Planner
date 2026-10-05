@@ -30,3 +30,6 @@ frontend/next-env.d.ts
 .DS_Store
 .idea/
 .vscode/
+
+# Local tool config
+.claude/

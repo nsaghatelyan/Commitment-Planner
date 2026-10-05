@@ -104,14 +104,18 @@ async def start_analysis(
 
 
 @router.get("/latest")
-def latest_analysis(tenant_id: uuid.UUID, session: SessionDep):
+def latest_analysis(
+    tenant_id: uuid.UUID,
+    session: SessionDep,
+    risk_profile: Literal["conservative", "balanced", "aggressive"] | None = None,
+):
     _tenant(session, tenant_id)
-    run = session.scalars(
-        select(AnalysisRun)
-        .where(AnalysisRun.tenant_id == tenant_id, AnalysisRun.status == "succeeded")
-        .order_by(AnalysisRun.finished_at.desc())
-        .limit(1)
-    ).first()
+    stmt = select(AnalysisRun).where(
+        AnalysisRun.tenant_id == tenant_id, AnalysisRun.status == "succeeded"
+    )
+    if risk_profile:
+        stmt = stmt.where(AnalysisRun.risk_profile == risk_profile)
+    run = session.scalars(stmt.order_by(AnalysisRun.finished_at.desc()).limit(1)).first()
     if run is None:
         raise HTTPException(404, "no completed analysis")
     return _run_out(run)

@@ -101,9 +101,36 @@ def spend_metrics(store: UsageStore, tenant_id: str, as_of: date) -> dict[str, A
         """,
         [since, as_of],
     ).fetchall()
+    by_service = con.execute(
+        """
+        SELECT provider, service_name,
+          sum(effective_cost) FILTER (WHERE pricing_category = 'On-Demand'
+                                      AND charge_category = 'Usage') AS on_demand,
+          sum(effective_cost) FILTER (WHERE commitment_status IN ('Used', 'Unused')) AS committed,
+          sum(effective_cost) FILTER (WHERE pricing_category = 'Spot') AS spot,
+          sum(on_demand_equiv_cost) FILTER (WHERE charge_category = 'Usage'
+              AND coalesce(commitment_status, 'Used') = 'Used') AS on_demand_equiv
+        FROM usage
+        WHERE charge_period_start >= ?1 AND charge_period_start < ?2
+          AND list_contains(?3, service_name)
+        GROUP BY ALL ORDER BY on_demand_equiv DESC NULLS LAST
+        """,
+        params,
+    ).fetchall()
     return {
         "providers": providers,
         "commitment_savings": {cid: (v or 0.0) * MONTH_FACTOR for cid, v in per_commitment},
+        "by_service": [
+            {
+                "provider": prov,
+                "service": svc,
+                "on_demand": round((od or 0) * MONTH_FACTOR, 2),
+                "committed": round((c or 0) * MONTH_FACTOR, 2),
+                "spot": round((sp or 0) * MONTH_FACTOR, 2),
+                "on_demand_equiv": round((eq or 0) * MONTH_FACTOR, 2),
+            }
+            for prov, svc, od, c, sp, eq in by_service
+        ],
     }
 
 
@@ -111,13 +138,28 @@ def _pct(a: float, b: float) -> float | None:
     return round(100 * a / b, 2) if b else None
 
 
+KIND_LABELS = {
+    k.AWS_SP_COMPUTE: "Compute Savings Plan",
+    k.AWS_SP_EC2: "EC2 Instance Savings Plan",
+    k.AWS_SP_SAGEMAKER: "SageMaker Savings Plan",
+    k.AWS_SP_DATABASE: "Database Savings Plan",
+    k.AWS_RI: "reserved",
+    k.AZURE_SP_COMPUTE: "Azure Savings Plan",
+    k.AZURE_RI: "Azure reservation",
+}
+ACTION_LABELS = {"purchase": "Buy", "renew": "Renew", "exchange": "Exchange into"}
+SERVICE_LABELS = {"ec2": "EC2", "rds": "RDS", "elasticache": "ElastiCache"}
+
+
 def _describe(r: EngineRecommendation) -> str:
+    action = ACTION_LABELS.get(r.action, r.action)
     if r.hourly_commitment is not None and r.kind in SP_KINDS:
-        what = f"${r.hourly_commitment:,.3f}/hour {r.kind}"
+        what = f"${r.hourly_commitment:,.3f}/hour {KIND_LABELS.get(r.kind, r.kind)}"
     else:
-        what = f"{r.quantity:g} × {r.instance_type or r.instance_family} {r.kind}"
-    where = " ".join(x for x in (r.service, r.region) if x and r.service != "compute")
-    return f"{r.action} {what}{' (' + where + ')' if where else ''}"
+        what = f"{r.quantity:g} × {r.instance_type or r.instance_family} ({KIND_LABELS.get(r.kind, r.kind)})"
+    service = SERVICE_LABELS.get(r.service or "", r.service)
+    where = ", ".join(x for x in (service, r.region) if x and r.service != "compute")
+    return f"{action} {what}{' — ' + where if where else ''}"
 
 
 def build_summary(
@@ -173,6 +215,8 @@ def build_summary(
         "warnings": result.warnings,
         "providers": providers,
         "on_demand_spend_monthly": round(total["on_demand_spend"], 2),
+        "on_demand_equiv_monthly": round(eligible_od, 2),
+        "spend_by_service": metrics.get("by_service", []),
         "spot_spend_monthly": round(total["spot_spend"], 2),
         "coverage_pct": _pct(total["covered_od"], eligible_od),
         "existing_utilization_pct": _pct(

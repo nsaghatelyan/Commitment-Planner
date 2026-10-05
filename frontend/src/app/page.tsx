@@ -1,27 +1,30 @@
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+"use client";
 
-async function getApiStatus(): Promise<string> {
-  try {
-    const res = await fetch(`${apiUrl}/health`, { cache: "no-store" });
-    if (!res.ok) return `error (${res.status})`;
-    const body = (await res.json()) as { status: string };
-    return body.status;
-  } catch {
-    return "unreachable";
-  }
-}
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 
-export const dynamic = "force-dynamic";
+import { Callout, Skeleton } from "@/components/ui";
+import { api } from "@/lib/api";
 
-export default async function Home() {
-  const status = await getApiStatus();
+export default function Home() {
+  const router = useRouter();
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api
+      .tenants()
+      .then((tenants) => {
+        if (!tenants.length) {
+          setError("No clients yet. Seed the synthetic data: python -m app.synthetic --seed-db --analyze");
+          return;
+        }
+        const pick = tenants.find((t) => t.slug === "synthetic-large") ?? tenants[0];
+        router.replace(`/t/${pick.id}`);
+      })
+      .catch((e) => setError(`Can't reach the API (${e.message}). Is the backend running on :8000?`));
+  }, [router]);
   return (
-    <main style={{ padding: "2rem", fontFamily: "system-ui, sans-serif" }}>
-      <h1>Savings Tool</h1>
-      <p>AWS and Azure savings plan and reservation recommendations.</p>
-      <p>
-        API ({apiUrl}): <strong>{status}</strong>
-      </p>
+    <main className="mx-auto max-w-xl p-10">
+      {error ? <Callout tone="warning" title="Nothing to show">{error}</Callout> : <Skeleton className="h-24" />}
     </main>
   );
 }

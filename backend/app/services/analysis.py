@@ -181,6 +181,7 @@ def run_analysis(
     store: UsageStore | None = None,
     settings: Settings | None = None,
     as_of: date | None = None,
+    with_backtest: bool = True,
 ) -> AnalysisRun:
     settings = settings or get_settings()
     store = store or UsageStore(settings.usage_storage_root)
@@ -209,14 +210,15 @@ def run_analysis(
     session.commit()
     try:
         tid = str(tenant.id)
-        analysis = analyze(
-            store,
-            tid,
-            commitments_for(session, tenant.id),
-            price_rows_for(session, usage_regions(store, tid)),
-            config,
-            as_of,
-        )
+        commitments = commitments_for(session, tenant.id)
+        prices = price_rows_for(session, usage_regions(store, tid))
+        analysis = analyze(store, tid, commitments, prices, config, as_of)
+        if with_backtest and analysis.data.first_day:
+            from app.services.backtest import backtest
+
+            analysis.summary["backtest"] = backtest(
+                store, tid, commitments, prices, config, analysis.data.as_of
+            )
         for r in analysis.result.recommendations:
             session.add(
                 Recommendation(

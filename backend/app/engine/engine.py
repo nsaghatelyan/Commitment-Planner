@@ -121,7 +121,11 @@ class PoolReport:
     stability: Stability
     skipped: str | None = None
     sizes: dict[str, float] = field(default_factory=dict)  # profile -> capacity (pool units)
+    # profile -> simulated capacity, utilization and monthly savings (1y base term)
+    profile_stats: dict[str, dict[str, float]] = field(default_factory=dict)
     recommendation: EngineRecommendation | None = None
+    # Hourly pool series before this layer's commitment was applied (for charts).
+    series: np.ndarray | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -285,7 +289,7 @@ class Engine:
         st = analyze(
             series, self.hour0_weekday, self.config.lookback_days, self.config.step_min_change
         )
-        report = PoolReport(pool, st)
+        report = PoolReport(pool, st, series=series)
         self.reports.append(report)
         if series.sum() <= 0:
             report.skipped = "no uncovered usage"
@@ -312,6 +316,14 @@ class Engine:
         for profile in ("conservative", "balanced", "aggressive"):
             s = self._choose(sizing_series, discounts[base_tp], profile, step, st)
             report.sizes[profile] = s.capacity if s else 0.0
+            if s:
+                saving = s.covered_units_per_hour - s.capacity * (1 - discounts[base_tp])
+                report.profile_stats[profile] = {
+                    "capacity": round(s.capacity, 4),
+                    "utilization_pct": round(100 * s.utilization, 2),
+                    "coverage_pct": round(100 * s.coverage, 2),
+                    "monthly_savings": round(saving * od_per_unit * HOURS_PER_MONTH, 2),
+                }
         sizing = self._choose(sizing_series, discounts[base_tp], self.profile, step, st)
         if sizing is None:
             report.skipped = self._no_floor_reason(st)
@@ -537,6 +549,7 @@ class Engine:
                 "night_ratio": st.night_ratio and round(st.night_ratio, 3),
             },
             "sizes_by_profile": {p: round(v, 4) for p, v in self._report_for(pool).sizes.items()},
+            "profiles": self._report_for(pool).profile_stats,
             "options": [
                 {
                     "term_months": o.term_months,
@@ -558,7 +571,9 @@ class Engine:
                 }
                 for c in expiring
             ],
-            "chart": self._chart(series, sizing.capacity),
+            "chart": self._chart(
+                self._report_for(pool).series, sizing.capacity, st.sizing_start_day
+            ),
         }
         if expiring and rec.quantity is not None and expiring_units:
             rec.details["renew_quantity"] = round(min(expiring_units, rec.quantity), 2)
@@ -585,19 +600,22 @@ class Engine:
                 total += c.quantity
         return total
 
-    def _chart(self, series: np.ndarray, capacity: float) -> dict[str, Any]:
-        """Hourly baseline (last 30 days) and daily min/mean/max of the sizing window."""
+    def _chart(self, series: np.ndarray, capacity: float, sizing_start_day: int) -> dict[str, Any]:
+        """Hourly baseline for the last 30 days and daily min/mean/max over the whole history
+        (so step changes are visible), with where sizing started."""
         days = len(series) // 24
         daily = series[: days * 24].reshape(days, 24)
-        start = self.as_of - timedelta(days=days)
+        first = int(np.argmax(daily.max(axis=1) > 0)) if daily.max() > 0 else 0
+        hourly_days = min(30, days - sizing_start_day)
         return {
             "commitment_line": round(capacity, 4),
-            "hourly_start": (self.as_of - timedelta(days=min(days, 30))).isoformat(),
-            "hourly": [round(float(v), 3) for v in series[-min(days, 30) * 24 :]],
-            "daily_start": start.date().isoformat(),
-            "daily_min": [round(float(v), 3) for v in daily.min(axis=1)],
-            "daily_mean": [round(float(v), 3) for v in daily.mean(axis=1)],
-            "daily_max": [round(float(v), 3) for v in daily.max(axis=1)],
+            "sizing_from": _day(self.data, sizing_start_day).isoformat(),
+            "hourly_start": (self.as_of - timedelta(days=hourly_days)).isoformat(),
+            "hourly": [round(float(v), 3) for v in series[-hourly_days * 24 :]],
+            "daily_start": _day(self.data, first).isoformat(),
+            "daily_min": [round(float(v), 3) for v in daily[first:].min(axis=1)],
+            "daily_mean": [round(float(v), 3) for v in daily[first:].mean(axis=1)],
+            "daily_max": [round(float(v), 3) for v in daily[first:].max(axis=1)],
         }
 
     def _rationale(
@@ -627,8 +645,8 @@ class Engine:
             floor = (
                 f"Your {svc} {label} usage in {pool.region}"
                 f"{' (' + pool.detail + ')' if pool.detail else ''} never dropped below "
-                f"{low:,.1f} {unit}/hour in {days} days (P10 {st.percentiles[10]:,.1f}, "
-                f"median {st.percentiles[50]:,.1f})"
+                f"{low:,.1f} {unit if '/' in unit else unit + '/hour'} in {days} days "
+                f"(P10 {st.percentiles[10]:,.1f}, median {st.percentiles[50]:,.1f})"
             )
             commit = (
                 f"Reserving {rec.quantity:g} × {rec.instance_type} for "
@@ -790,7 +808,9 @@ class Engine:
                 "recent_utilization_pct": round(recent, 2),
                 "unused_monthly": round((1 - recent / 100) * value_per_hour * HOURS_PER_MONTH, 2),
                 "units": round(units, 4),
+                "pool": asdict(pool),
                 "pool_label": pool.label,
+                "od_per_unit_hour": round(od_per_unit, 6),
             },
         )
         self.recommendations.append(rec)
@@ -872,6 +892,76 @@ class Engine:
             r.plan_rank = i
         flags = [r for r in self.recommendations if r.action == "flag"]
         self.recommendations = plan + flags
+
+    # ---- backtest
+    def replay(self, recommendations: list[EngineRecommendation]) -> list[dict[str, Any]]:
+        """Apply a plan, in layer order, to this engine's (later) usage and measure what it
+        would actually have achieved, per recommendation."""
+        by_pool: dict[Pool, list[EngineRecommendation]] = defaultdict(list)
+        for r in recommendations:
+            if r.action in ("purchase", "renew", "exchange") and "pool" in r.details:
+                by_pool[Pool(**r.details["pool"])].append(r)
+        layers = [
+            self._group(lambda g: [ri_pool(g)] if g.cover_type in (None, "ri") else []),
+            self._group(
+                lambda g: (
+                    [p for p in sp_pools(g) if p.layer == LAYER_INSTANCE_SP]
+                    if g.cover_type in (None, "ri", k.AWS_SP_EC2)
+                    else []
+                )
+            ),
+            self._group(lambda g: [p for p in sp_pools(g) if p.layer == LAYER_COMPUTE_SP]),
+        ]
+        out = []
+        for pools in layers:
+            for pool, recs in sorted(by_pool.items(), key=lambda kv: kv[0].label):
+                if (
+                    pool.layer
+                    != {0: LAYER_RI, 1: LAYER_INSTANCE_SP, 2: LAYER_COMPUTE_SP}[layers.index(pools)]
+                ):
+                    continue
+                groups = pools.get(pool, [])
+                series = self._series(pool, groups) if groups else np.zeros(self.data.hours)
+                exchange = sum(r.details.get("units", 0) for r in recs if r.action == "exchange")
+                for r in sorted(recs, key=lambda r: r.action != "exchange"):
+                    od_unit = r.details["od_per_unit_hour"]
+                    if r.action == "exchange":
+                        util, covered = simulate(series, exchange)
+                        saving = covered * od_unit * HOURS_PER_MONTH
+                    else:
+                        units = r.details["purchase_units"]
+                        d = next(
+                            o["discount"]
+                            for o in r.details["options"]
+                            if o["term_months"] == r.term_months
+                            and o["payment_option"] == r.payment_option
+                        )
+                        util, covered = self._marginal(series, exchange, units)
+                        saving = (covered - units * (1 - d)) * od_unit * HOURS_PER_MONTH
+                    out.append(
+                        {
+                            "plan_rank": r.plan_rank,
+                            "action": r.action,
+                            "kind": r.kind,
+                            "pool": pool.label,
+                            "instance_type": r.instance_type,
+                            "quantity": r.quantity,
+                            "hourly_commitment": r.hourly_commitment,
+                            "projected_utilization_pct": r.expected_utilization_pct,
+                            "realized_utilization_pct": round(100 * util, 2),
+                            "projected_monthly_savings": r.monthly_savings,
+                            "realized_monthly_savings": round(saving, 2),
+                            "commitment_monthly_cost": round(
+                                (r.monthly_cost_after or 0) if r.action != "exchange" else 0, 2
+                            ),
+                        }
+                    )
+                if groups:
+                    capacity = exchange + sum(
+                        r.details.get("purchase_units", 0) for r in recs if r.action != "exchange"
+                    )
+                    self._consume(pool, groups, capacity)
+        return out
 
 
 def run_engine(data, prices, commitments, config=None) -> EngineResult:

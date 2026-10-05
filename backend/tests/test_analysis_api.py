@@ -80,3 +80,46 @@ def test_api(db_session, seeded):
         app.dependency_overrides.clear()
     assert db_session.scalar(select(func.count()).select_from(AnalysisRun)) == 1
     assert db_session.get(Tenant, uuid.UUID(tenant.tenant_id)).risk_profile == "balanced"
+
+
+def test_dashboard_endpoints(db_session, seeded, monkeypatch, tmp_path):
+    tenant, store = seeded
+    monkeypatch.setattr(
+        "app.api.tenants.get_settings",
+        lambda: Settings(usage_storage_root=str(tmp_path / "data")),
+    )
+    run_analysis(db_session, uuid.UUID(tenant.tenant_id), store=store, risk_profile="aggressive")
+    app.dependency_overrides[get_session] = lambda: db_session
+    try:
+        client = TestClient(app)
+        tenants = client.get("/tenants").json()
+        (row,) = [t for t in tenants if t["id"] == tenant.tenant_id]
+        assert row["connections"][0]["provider"] == "aws"
+        assert row["latest_run"]["projected_monthly_savings"] > 0
+        assert client.get(f"/tenants/{tenant.tenant_id}").json()["id"] == tenant.tenant_id
+
+        base = f"/tenants/{tenant.tenant_id}"
+        assert client.get(f"{base}/analysis-runs/latest?risk_profile=balanced").status_code == 404
+        latest = client.get(f"{base}/analysis-runs/latest?risk_profile=aggressive").json()
+        assert latest["risk_profile"] == "aggressive"
+        backtest = latest["summary"]["backtest"]
+        # 45 days of history leaves only 15 days before the 30-day holdout
+        assert not backtest["available"] and "history" in backtest["reason"]
+
+        daily = client.get(f"{base}/usage/daily?days=30").json()
+        assert len(daily["days"]) == 30
+        assert sum(d["committed"] for d in daily["days"]) > 0
+
+        (sp,) = client.get(f"{base}/commitments").json()
+        assert sp["kind"] == "aws_sp_compute" and len(sp["utilization"]) == 45
+        assert sp["recent_utilization_pct"] == 100
+
+        recs = client.get(f"{base}/analysis-runs/{latest['id']}/recommendations").json()
+        resp = client.patch(f"/recommendations/{recs[0]['id']}", json={"status": "accepted"})
+        assert resp.json()["status"] == "accepted"
+        assert (
+            client.patch(f"/recommendations/{recs[0]['id']}", json={"status": "x"}).status_code
+            == 422
+        )
+    finally:
+        app.dependency_overrides.clear()

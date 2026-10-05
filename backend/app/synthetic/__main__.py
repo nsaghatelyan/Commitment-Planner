@@ -17,6 +17,9 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=None, help="override days of history")
     parser.add_argument("--out", default=None, help="usage storage root (default: settings)")
     parser.add_argument("--seed-db", action="store_true", help="also load Postgres")
+    parser.add_argument(
+        "--analyze", action="store_true", help="with --seed-db: also run the engine (balanced)"
+    )
     args = parser.parse_args()
 
     store = UsageStore(args.out or get_settings().usage_storage_root)
@@ -29,6 +32,16 @@ def main() -> None:
 
             with SessionLocal() as session:
                 counts = seed(session, tenant, store)
+                if args.analyze:
+                    import uuid
+
+                    from app.services.analysis import run_analysis
+
+                    for profile in ("conservative", "aggressive", "balanced"):
+                        run = run_analysis(
+                            session, uuid.UUID(tenant.tenant_id), store=store, risk_profile=profile
+                        )
+                        counts[f"analysis_{profile}"] = run.status
         else:
             counts = {"usage_rows": 0}
             for provider in ("aws", "azure"):

@@ -275,3 +275,27 @@ def test_summary(runs):
     assert comparison["by_kind"] and comparison["explanations"]
     assert any("30 days" in e for e in comparison["explanations"])
     assert date.fromisoformat(s["as_of"]) == tenant.end
+
+
+def test_backtest_replays_the_plan_on_unseen_days(runs):
+    from app.engine.config import EngineConfig
+    from app.services.backtest import backtest
+    from app.synthetic.analysis import commitment_infos, price_rows
+
+    tenant, _, store = runs["large"]
+    bt = backtest(
+        store,
+        tenant.tenant_id,
+        commitment_infos(tenant),
+        price_rows(tenant),
+        EngineConfig(),
+        tenant.end,
+    )
+    assert bt["available"] and bt["train_until"] == (tenant.end - timedelta(days=30)).isoformat()
+    assert bt["recommendations"]
+    assert 80 <= bt["savings_accuracy_pct"] <= 110
+    for r in bt["recommendations"]:
+        assert 0 <= r["realized_utilization_pct"] <= 100
+    tenant, _, store = runs["startup"]
+    short = backtest(store, tenant.tenant_id, [], price_rows(tenant), EngineConfig(), tenant.end)
+    assert not short["available"] and "history" in short["reason"]
