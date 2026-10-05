@@ -21,8 +21,12 @@ class EngineConfig:
     min_settled_days: int = 21
     # Below this much tenant history we warn and only allow conservative 1y No Upfront.
     min_history_days: int = 30
-    # Ignore recommendations saving less than this per month.
+    # Hold back recommendations saving less than this per month: a 1-3 year lock-in isn't worth
+    # a few dollars. Small accounts get a lower bar, this share of their monthly
+    # commitment-eligible spend, but never below min_monthly_savings_floor.
     min_monthly_savings: float = 5.0
+    min_savings_share: float = 0.02
+    min_monthly_savings_floor: float = 1.0
     # A step change must move daily mean usage by at least this fraction.
     step_min_change: float = 0.25
 

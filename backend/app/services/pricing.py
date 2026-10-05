@@ -33,6 +33,9 @@ def upsert_prices(session: Session, records: Iterable[PriceRecord]) -> int:
         )
         if len(batch) >= BATCH:
             count += _flush(session, batch)
+            # Commit per batch: a full catalog pull takes minutes, and holding its row locks
+            # that long blocks every collection that syncs overlapping prices.
+            session.commit()
             batch = []
     if batch:
         count += _flush(session, batch)

@@ -3,7 +3,7 @@
 import { Clock, Moon, Sparkles, Sun, TrendingDown, Zap } from "lucide-react";
 
 import { Card, CardHeader, Empty } from "@/components/ui";
-import { money, poolLabel } from "@/lib/format";
+import { money, payment, poolLabel, term } from "@/lib/format";
 import type { Summary } from "@/lib/types";
 
 const GROUPS = [
@@ -19,9 +19,42 @@ export function ExcludedPanel({ summary }: { summary: Summary }) {
   // Each pool goes to the first group whose pattern matches its reason.
   const groupOf = (reason: string) => GROUPS.findIndex((g) => g.match.test(reason));
   const grouped = GROUPS.map((g, i) => ({ ...g, pools: pools.filter((p) => groupOf(p.reason) === i) }));
-  const other = pools.filter((p) => groupOf(p.reason) === -1);
+  const held = summary.below_threshold ?? [];
+  const heldPools = new Set(held.map((h) => h.pool));
+  const other = pools.filter((p) => groupOf(p.reason) === -1 && !heldPools.has(p.pool));
+  const floor = summary.savings_floor_monthly;
   return (
     <div className="space-y-5">
+      {held.length > 0 && (
+        <Card>
+          <CardHeader
+            title="Small savings held back"
+            description={`Each would save less than ${floor != null ? money(floor, { cents: true }) : "the minimum"}/month, too little to justify a 1–3 year commitment by default. The minimum is $5/month, lowered to 2% of eligible spend for small accounts (never below $1). Worth buying if you expect the usage to stay.`}
+          />
+          <div className="overflow-x-auto px-5 pb-4">
+            <table className="w-full min-w-[560px] text-[13px] tabular">
+              <thead className="text-left text-[12px] text-muted">
+                <tr>
+                  <th className="py-1.5 font-medium">Would buy</th>
+                  <th className="py-1.5 font-medium">Term · payment</th>
+                  <th className="py-1.5 text-right font-medium">Savings / mo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {held.map((h) => (
+                  <tr key={h.pool} className="border-t border-border">
+                    <td className="py-2">{h.description}</td>
+                    <td className="py-2">
+                      {term(h.term_months)} · {payment(h.payment_option)}
+                    </td>
+                    <td className="py-2 text-right">{money(h.monthly_savings, { cents: true })}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
       <Card>
         <CardHeader
           title="Deliberately not committed"

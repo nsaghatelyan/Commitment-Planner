@@ -486,9 +486,16 @@ def test_commitment_inventory():
 def test_utilization():
     stubs = Stubs()
     ce = stubs.stub("ce")
-    ce.add_response(
-        "get_reservation_utilization", fixture_json("aws/ce_get_reservation_utilization.json")
-    )
+    # Granularity can't be combined with GroupBy SUBSCRIPTION_ID, so it's one call per day.
+    for start, end in (("2026-09-01", "2026-09-02"), ("2026-09-02", "2026-09-03")):
+        ce.add_response(
+            "get_reservation_utilization",
+            fixture_json("aws/ce_get_reservation_utilization.json"),
+            {
+                "TimePeriod": {"Start": start, "End": end},
+                "GroupBy": [{"Type": "DIMENSION", "Key": "SUBSCRIPTION_ID"}],
+            },
+        )
     for day in ("2026-09-01", "2026-09-02"):
         ce.add_response(
             "get_savings_plans_utilization_details",
@@ -511,7 +518,9 @@ def test_utilization():
         )
     records = _collector(stubs).collect_utilization(date(2026, 9, 1), date(2026, 9, 3))
     stubs.assert_done()
-    ri = next(r for r in records if r.provider_commitment_id.startswith("7a6b"))
+    ri = [r for r in records if r.provider_commitment_id.startswith("7a6b")]
+    assert [r.date for r in ri] == [date(2026, 9, 1), date(2026, 9, 2)]
+    ri = ri[0]
     assert ri.utilization_pct == Decimal(75)
     assert ri.unused_cost == Decimal("11.52") * 24 / 96
     sp = [r for r in records if r.provider_commitment_id.endswith("8f1c2a2e")]

@@ -167,6 +167,32 @@ def test_run_collection_end_to_end(db_session, connection, settings):
 
 
 @pytest.mark.db
+def test_run_collection_publishes_call_counts_while_running(db_session, connection, settings):
+    """Other sessions (the API) see call counts before the run finishes."""
+    from sqlalchemy.orm import Session
+
+    seen = []
+
+    class Watched(FakeCollector):
+        def collect_commitments(self):
+            # Bootstrap is done at this point; read the run the way the API would.
+            with Session(db_session.get_bind()) as other:
+                run = other.scalars(select(CollectionRun)).one()
+                seen.append((run.status, run.api_calls, run.details.get("cost_explorer_usd")))
+            return super().collect_commitments()
+
+    run = run_collection(
+        db_session,
+        connection.id,
+        settings=settings,
+        collector_factory=lambda *a: Watched(),
+        today=TODAY,
+    )
+    assert seen == [("running", 3, 0.02)]
+    assert run.status == "succeeded" and run.api_calls == 3
+
+
+@pytest.mark.db
 def test_run_collection_records_failures(db_session, connection, settings):
     run = run_collection(
         db_session,

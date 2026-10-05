@@ -17,6 +17,7 @@ from app.collectors.aws.session import assumed_role_session
 from app.collectors.base import Collector
 from app.collectors.cache import ApiCache, CountingCaller
 from app.collectors.types import (
+    AWS_RI,
     AccountInfo,
     CallStats,
     CommitmentRecord,
@@ -54,6 +55,7 @@ class AwsCollector(Collector):
         self.profile = profile
         self.warnings: list[str] = []
         self._has_savings_plans = True
+        self._has_reservations = True
         self.export_bucket = export_bucket
         self.export_prefix = export_prefix or ""
         self.region = region
@@ -186,7 +188,9 @@ class AwsCollector(Collector):
         end = utc_today()
         _, ri_attrs = self._try(
             "Reservation utilization",
-            lambda: cm.ri_utilization(self.client("ce"), self.call, end - timedelta(days=7), end),
+            lambda: cm.ri_utilization(
+                self.client("ce"), self.call, end - timedelta(days=7), end, daily=False
+            ),
             ([], {}),
         )
         known = {r.provider_commitment_id for r in records}
@@ -196,15 +200,19 @@ class AwsCollector(Collector):
                 record = cm.ri_from_ce_attributes(rid, attrs)
                 if record:
                     records.append(record)
+        self._has_reservations = any(r.kind == AWS_RI for r in records)
         return records
 
     def collect_utilization(self, start: date, end: date) -> list[UtilizationRecord]:
         ce = self.client("ce")
-        ri, _ = self._try(
-            "Reservation utilization",
-            lambda: cm.ri_utilization(ce, self.call, start, end),
-            ([], {}),
-        )
+        ri: list[UtilizationRecord] = []
+        if self._has_reservations:
+            # One billed call per day; skip it when there is nothing to measure.
+            ri, _ = self._try(
+                "Reservation utilization",
+                lambda: cm.ri_utilization(ce, self.call, start, end),
+                ([], {}),
+            )
         if not self._has_savings_plans:
             # One billed call per day; skip it when there is nothing to measure.
             return ri

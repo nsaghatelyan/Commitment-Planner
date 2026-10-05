@@ -299,3 +299,89 @@ def test_backtest_replays_the_plan_on_unseen_days(runs):
     tenant, _, store = runs["startup"]
     short = backtest(store, tenant.tenant_id, [], price_rows(tenant), EngineConfig(), tenant.end)
     assert not short["available"] and "history" in short["reason"]
+
+
+def _t2_nano(term_months, payment_option, savings):
+    return {
+        "provider": "aws",
+        "kind": "aws_ri",
+        "term_months": term_months,
+        "payment_option": payment_option,
+        "lookback_days": 30,
+        "quantity": 2,
+        "estimated_monthly_savings": savings,
+    }
+
+
+NATIVE_T2_NANO = [
+    _t2_nano(36, "all_upfront", 5.29),
+    _t2_nano(36, "no_upfront", 4.81),
+    _t2_nano(12, "all_upfront", 3.63),
+    _t2_nano(12, "no_upfront", 3.20),
+]
+
+
+def test_native_comparison_counts_one_term_payment_option():
+    """The same opportunity comes back once per term/payment option; they aren't additive."""
+    from types import SimpleNamespace
+
+    from app.engine.summary import compare_native
+
+    result = SimpleNamespace(recommendations=[], pools=[])
+    (row,) = compare_native(result, NATIVE_T2_NANO)["by_kind"]
+    # No engine plan: the best native option.
+    assert (row["native_term_months"], row["native_payment_option"]) == (36, "all_upfront")
+    assert row["native_monthly_savings"] == pytest.approx(5.29)
+    assert row["native_quantity"] == 2 and row["native_count"] == 1
+    assert row["native_options"] == 4
+
+    engine = SimpleNamespace(
+        provider="aws",
+        kind="aws_ri",
+        plan_rank=1,
+        hourly_commitment=None,
+        quantity=2,
+        monthly_savings=3.0,
+        term_months=12,
+        payment_option="no_upfront",
+        action="buy",
+    )
+    result = SimpleNamespace(recommendations=[engine], pools=[])
+    (row,) = compare_native(result, NATIVE_T2_NANO)["by_kind"]
+    # With an engine plan: the native option it chose, so both columns are like for like.
+    assert (row["native_term_months"], row["native_payment_option"]) == (12, "no_upfront")
+    assert row["native_monthly_savings"] == pytest.approx(3.20)
+
+
+def test_small_savings_are_held_back_and_reported(runs):
+    """Below the savings floor a recommendation is held back, not dropped: the summary lists it."""
+    from app.engine.config import EngineConfig
+    from app.services.analysis import analyze
+    from app.synthetic.analysis import commitment_infos, price_rows
+
+    tenant, a, store = runs["large"]
+    # A large account keeps the absolute $5 floor.
+    assert a.summary["savings_floor_monthly"] == 5.0
+    buys = [
+        r for r in a.result.recommendations if r.plan_rank is not None and r.action == "purchase"
+    ]
+    smallest = min(buys, key=lambda r: r.monthly_savings)
+
+    def run(config):
+        return analyze(
+            store, tenant.tenant_id, commitment_infos(tenant), price_rows(tenant), config,
+            as_of=tenant.end, native=[],
+        )  # fmt: skip
+
+    # Raise the bar just above the smallest buy (no share-based lowering).
+    raised = run(EngineConfig(min_monthly_savings=smallest.monthly_savings + 0.01,
+                              min_savings_share=1.0))  # fmt: skip
+    held = raised.summary["below_threshold"]
+    assert any(h["monthly_savings"] == smallest.monthly_savings for h in held)
+    assert all(h["monthly_savings"] < raised.summary["savings_floor_monthly"] for h in held)
+    planned = {p["description"] for p in raised.summary["purchase_plan"]}
+    assert not planned & {h["description"] for h in held}
+
+    # A tiny share of spend lowers the bar to the absolute floor.
+    lowered = run(EngineConfig(min_monthly_savings=1000.0, min_savings_share=1e-9))
+    assert lowered.summary["savings_floor_monthly"] == 1.0

@@ -124,6 +124,8 @@ class PoolReport:
     # profile -> simulated capacity, utilization and monthly savings (1y base term)
     profile_stats: dict[str, dict[str, float]] = field(default_factory=dict)
     recommendation: EngineRecommendation | None = None
+    # What would have been recommended, when held back for saving too little.
+    held_back: EngineRecommendation | None = None
     # Hourly pool series before this layer's commitment was applied (for charts).
     series: np.ndarray | None = field(default=None, repr=False)
 
@@ -199,6 +201,7 @@ class Engine:
         self.recommendations: list[EngineRecommendation] = []
         self.warnings: list[str] = []
         self.exchange_units: dict[Pool, tuple[float, CommitmentInfo, float]] = {}
+        self.savings_floor = self._savings_floor()
 
     # ---- top level
     def run(self) -> EngineResult:
@@ -226,7 +229,23 @@ class Engine:
             self._size_pool(pool, groups)
         self._flag_existing()
         self._rank()
-        return EngineResult(self.recommendations, {}, self.reports, self.warnings)
+        return EngineResult(
+            self.recommendations,
+            {"savings_floor_monthly": round(self.savings_floor, 2)},
+            self.reports,
+            self.warnings,
+        )
+
+    def _savings_floor(self) -> float:
+        """Minimum monthly savings worth a commitment: min_monthly_savings, lowered for small
+        accounts to min_savings_share of their recent eligible spend, never below the floor."""
+        cfg = self.config
+        hours = min(self.data.hours, 30 * 24)
+        if not hours or not self.data.groups:
+            return cfg.min_monthly_savings
+        hourly = sum(float(g.od[-hours:].sum()) for g in self.data.groups) / hours
+        share = cfg.min_savings_share * hourly * HOURS_PER_MONTH
+        return max(cfg.min_monthly_savings_floor, min(cfg.min_monthly_savings, share))
 
     def _group(self, assign) -> dict[Pool, list[UsageGroup]]:
         pools: dict[Pool, list[UsageGroup]] = defaultdict(list)
@@ -356,9 +375,6 @@ class Engine:
             st, opts, base_tp, od_per_unit, purchase_covered, capacity_to_buy, discounts
         )
         opt = opts[chosen_tp]
-        if opt.monthly_savings < self.config.min_monthly_savings:
-            report.skipped = f"saves less than ${self.config.min_monthly_savings:.0f}/month"
-            return
         rec = self._recommendation(
             pool,
             groups,
@@ -372,6 +388,10 @@ class Engine:
             sizing_series,
             exchanged_units,
         )
+        if opt.monthly_savings < self.savings_floor:
+            report.skipped = f"saves less than {_fmt_money(self.savings_floor)}/month"
+            report.held_back = rec
+            return
         report.recommendation = rec
         self.recommendations.append(rec)
 

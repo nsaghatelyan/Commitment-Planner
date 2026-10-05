@@ -4,6 +4,7 @@ public Describe API in boto3)."""
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from functools import cache
 from typing import Any
 
 from app.collectors.cache import CountingCaller
@@ -178,6 +179,19 @@ def _tolerant(call: CountingCaller, warn, api: str, fn, **kwargs) -> dict:
         return {}
 
 
+@cache
+def _offered_regions(service: str) -> frozenset[str]:
+    import boto3
+
+    return frozenset(boto3.session.Session().get_available_regions(service))
+
+
+def offered_in(service: str, region: str) -> bool:
+    """Per botocore's endpoint data. Unknown (no data for the service) counts as offered."""
+    regions = _offered_regions(service)
+    return not regions or region in regions
+
+
 def reserved_instances(
     session_client,
     call: CountingCaller,
@@ -189,6 +203,9 @@ def reserved_instances(
     out: list[CommitmentRecord] = []
 
     def call_(api, fn, **kwargs):
+        # e.g. MemoryDB has no endpoint at all in some regions; that isn't worth a warning.
+        if not offered_in(api.split(":", 1)[0], region):
+            return {}
         return _tolerant(call, warn, f"{api} ({region})", fn, **kwargs)
 
     for region in regions:
@@ -367,16 +384,34 @@ def reserved_instances(
 
 
 def ri_utilization(
-    ce: Any, call: CountingCaller, start: date, end: date
+    ce: Any, call: CountingCaller, start: date, end: date, daily: bool = True
 ) -> tuple[list[UtilizationRecord], dict[str, dict[str, Any]]]:
-    """Daily utilization per reservation (org-wide), plus each reservation's attributes."""
+    """Utilization per reservation (org-wide), plus each reservation's attributes.
+
+    Cost Explorer rejects Granularity when grouping by SUBSCRIPTION_ID, so daily figures take
+    one (billed) call per day; daily=False makes one call covering the whole window."""
     records: list[UtilizationRecord] = []
     attributes: dict[str, dict[str, Any]] = {}
+    step = timedelta(days=1) if daily else end - start
+    day = start
+    while day < end:
+        _ri_utilization_period(ce, call, day, min(day + step, end), records, attributes)
+        day += step
+    return records, attributes
+
+
+def _ri_utilization_period(
+    ce: Any,
+    call: CountingCaller,
+    start: date,
+    end: date,
+    records: list[UtilizationRecord],
+    attributes: dict[str, dict[str, Any]],
+) -> None:
     token = None
     while True:
         kwargs: dict[str, Any] = {
             "TimePeriod": {"Start": start.isoformat(), "End": end.isoformat()},
-            "Granularity": "DAILY",
             "GroupBy": [{"Type": "DIMENSION", "Key": "SUBSCRIPTION_ID"}],
         }
         if token:
@@ -388,7 +423,6 @@ def ri_utilization(
             **kwargs,
         )
         for period in resp.get("UtilizationsByTime", []):
-            day = date.fromisoformat(period["TimePeriod"]["Start"])
             for group in period.get("Groups", []):
                 attrs = group.get("Attributes", {})
                 rid = attrs.get("leaseId") or group.get("Value")
@@ -403,7 +437,7 @@ def ri_utilization(
                 records.append(
                     UtilizationRecord(
                         provider_commitment_id=rid,
-                        date=day,
+                        date=start,
                         utilization_pct=_dec(util.get("UtilizationPercentage")) or Decimal(0),
                         unused_cost=unused_cost,
                         used_amount=fee - unused_cost if unused_cost is not None else None,
@@ -412,7 +446,7 @@ def ri_utilization(
                 )
         token = resp.get("NextPageToken")
         if not token:
-            return records, attributes
+            return
 
 
 def ri_from_ce_attributes(rid: str, attrs: dict[str, Any]) -> CommitmentRecord | None:

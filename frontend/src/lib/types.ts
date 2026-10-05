@@ -63,6 +63,10 @@ export interface ComparisonRow {
   provider: string;
   kind: string;
   native_count: number;
+  /** Term/payment alternatives the provider returned; only native_term_months/native_payment_option is totalled. */
+  native_options?: number;
+  native_term_months?: number | null;
+  native_payment_option?: string | null;
   native_hourly_commitment: number;
   native_quantity: number;
   native_monthly_savings: number;
@@ -119,6 +123,10 @@ export interface Summary {
   effective_savings_rate_current_pct: number | null;
   effective_savings_rate_new_pct: number | null;
   skipped_pools: { pool: string; reason: string }[];
+  /** Minimum monthly savings for a recommendation on this account; older runs lack it. */
+  savings_floor_monthly?: number | null;
+  /** Recommendations held back for saving less than savings_floor_monthly. */
+  below_threshold?: HeldBack[];
   spend_by_service: ServiceSpend[];
   providers: Record<string, Record<string, number>>;
   native_comparison: { by_kind: ComparisonRow[]; explanations: string[] };
@@ -297,3 +305,13 @@ export type ConnectionInput = Partial<Omit<Connection, "id" | "tenant_id" | "sta
   provider: "aws" | "azure";
   name: string;
 };
+
+export interface HeldBack {
+  pool: string;
+  description: string;
+  term_months: number;
+  payment_option: string | null;
+  upfront_cost: number | null;
+  monthly_savings: number;
+  risk: string;
+}

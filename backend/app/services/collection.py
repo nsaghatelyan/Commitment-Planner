@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -148,6 +148,7 @@ def run_collection(
     cache = ApiCache(settings.api_cache_dir, settings.api_cache_ttl_hours * 3600)
     collector = collector_factory(conn, settings, cache)
     tenant = str(conn.tenant_id)
+    progress = _progress_writer(session, run.id, collector)
     rows = 0
     written: set[date] = set()
     details: dict[str, Any] = {"sources": []}
@@ -155,6 +156,7 @@ def run_collection(
         collector.test_connection()
         conn.last_verified_at = utc_now()
         accounts = sync_accounts(session, conn, collector)
+        progress()
 
         # 1. Billing export: the primary source.
         since = previous.started_at.date() - timedelta(days=1) if previous else None
@@ -187,12 +189,14 @@ def run_collection(
             details["sources"].append("api_bootstrap")
             details["bootstrap_window"] = [d.isoformat() for d in window]
             covered |= _days(*window)
+            progress()
         if covered:
             details["bootstrap_covered"] = [min(covered).isoformat(), max(covered).isoformat()]
 
         # 3. Existing commitments, their utilization, and native recommendations.
         commitments = collector.collect_commitments()
         ids = upsert_commitments(session, conn, accounts, commitments)
+        progress()
         util = collector.collect_utilization(
             today - timedelta(days=UTILIZATION_LOOKBACK_DAYS), today
         )
@@ -202,6 +206,7 @@ def run_collection(
             store, tenant, conn.provider, today, native
         )
         details["commitments"] = len(commitments)
+        progress()
 
         # 4. Public prices for what this client actually runs, so the engine can size them.
         if sync_prices:
@@ -230,18 +235,47 @@ def run_collection(
         run.finished_at = utc_now()
         run.rows_ingested = rows
         run.api_calls = collector.stats.total
-        details["api_calls"] = collector.stats.calls
-        details["cache_hits"] = collector.stats.cache_hits
+        details.update(_call_details(collector))
         if getattr(collector, "warnings", None):
             details["warnings"] = details.get("warnings", []) + collector.warnings
-        details["cost_explorer_usd"] = round(
-            0.01 * sum(n for api, n in collector.stats.calls.items() if api.startswith("ce:")), 2
-        )
         if written:
             run.period_start, run.period_end = min(written), max(written)
         run.details = details
         session.commit()
     return run
+
+
+def _call_details(collector: Collector) -> dict[str, Any]:
+    calls = dict(collector.stats.calls)
+    return {
+        "api_calls": calls,
+        "cache_hits": collector.stats.cache_hits,
+        "cost_explorer_usd": round(
+            0.01 * sum(n for api, n in calls.items() if api.startswith("ce:")), 2
+        ),
+    }
+
+
+def _progress_writer(session: Session, run_id: Any, collector: Collector) -> Callable[[], None]:
+    """Publish call counts while the run is in progress. Writes on its own connection so the
+    run's uncommitted work still rolls back as a unit if a later step fails."""
+    engine = session.get_bind()
+
+    def write() -> None:
+        try:
+            with engine.begin() as db:
+                db.execute(
+                    update(CollectionRun)
+                    .where(CollectionRun.id == run_id)
+                    .values(
+                        api_calls=collector.stats.total,
+                        details=CollectionRun.details.op("||")(_call_details(collector)),
+                    )
+                )
+        except Exception:  # progress is cosmetic; never fail the run over it
+            log.warning("could not record progress for collection run %s", run_id, exc_info=True)
+
+    return write
 
 
 def _days(start: date, end: date) -> set[date]:

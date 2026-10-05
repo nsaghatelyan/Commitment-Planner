@@ -17,7 +17,8 @@ RI_SERVICES = [
     "Amazon ElastiCache",
     "Amazon OpenSearch Service",
     "Amazon Redshift",
-    "Amazon MemoryDB",
+    # Cost Explorer's name for it; elsewhere the service is "Amazon MemoryDB".
+    "Amazon MemoryDB Service",
 ]
 
 

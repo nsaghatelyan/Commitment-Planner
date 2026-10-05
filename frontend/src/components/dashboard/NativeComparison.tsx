@@ -14,7 +14,7 @@ export function NativeComparison({ summary, recommendations }: { summary: Summar
       <Card>
         <CardHeader
           title="Engine vs. provider recommendations"
-          description={`Engine ${money(engineTotal)}/mo vs native ${money(nativeTotal)}/mo of projected savings`}
+          description={`Engine ${money(engineTotal)}/mo vs native ${money(nativeTotal)}/mo of projected savings. Providers return one recommendation per term and payment option; only one option is counted per commitment type.`}
         />
         {cmp.by_kind.length ? (
           <div className="overflow-x-auto px-5 pb-4">
@@ -39,6 +39,12 @@ export function NativeComparison({ summary, recommendations }: { summary: Summar
                       <td className="py-2 text-right">
                         {r.native_count ? (sp ? hourly(r.native_hourly_commitment) : `${num(r.native_quantity, 0)} reserved`) : "—"}
                         <span className="ml-1 text-[11px] text-muted">({r.native_count})</span>
+                        {r.native_term_months ? (
+                          <div className="text-[11px] text-muted">
+                            {term(r.native_term_months)} · {payment(r.native_payment_option ?? null)}
+                            {(r.native_options ?? 0) > 1 && ` (1 of ${r.native_options} options)`}
+                          </div>
+                        ) : null}
                       </td>
                       <td className="py-2 text-right">
                         {r.engine_count ? (sp ? hourly(r.engine_hourly_commitment) : `${num(r.engine_quantity, 0)} reserved`) : "—"}

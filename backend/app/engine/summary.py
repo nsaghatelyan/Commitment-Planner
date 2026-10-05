@@ -266,6 +266,20 @@ def build_summary(
         "expiring_savings_monthly": round(lost, 2),
         "effective_savings_rate_current_pct": _pct(eligible_od - current_effective, eligible_od),
         "effective_savings_rate_new_pct": _pct(eligible_od - new_effective, eligible_od),
+        "savings_floor_monthly": result.summary.get("savings_floor_monthly"),
+        "below_threshold": [
+            {
+                "pool": p.pool.label,
+                "description": _describe(p.held_back),
+                "term_months": p.held_back.term_months,
+                "payment_option": p.held_back.payment_option,
+                "upfront_cost": p.held_back.upfront_cost,
+                "monthly_savings": p.held_back.monthly_savings,
+                "risk": p.held_back.risk,
+            }
+            for p in result.pools
+            if p.held_back is not None
+        ],
         "skipped_pools": [
             {"pool": p.pool.label, "reason": p.skipped}
             for p in result.pools
@@ -274,6 +288,10 @@ def build_summary(
     }
     summary["native_comparison"] = compare_native(result, native)
     return summary
+
+
+def _native_savings(recs: list[dict[str, Any]]) -> float:
+    return sum(float(n.get("estimated_monthly_savings") or 0) for n in recs)
 
 
 def compare_native(result: EngineResult, native: list[dict[str, Any]]) -> dict[str, Any]:
@@ -288,6 +306,9 @@ def compare_native(result: EngineResult, native: list[dict[str, Any]]) -> dict[s
                 "provider": provider,
                 "kind": kind,
                 "native_count": 0,
+                "native_options": 0,
+                "native_term_months": None,
+                "native_payment_option": None,
                 "native_hourly_commitment": 0.0,
                 "native_quantity": 0.0,
                 "native_monthly_savings": 0.0,
@@ -298,20 +319,39 @@ def compare_native(result: EngineResult, native: list[dict[str, Any]]) -> dict[s
             },
         )
 
-    lookbacks = set()
-    for n in native:
-        r = row(n["provider"], n["kind"])
-        r["native_count"] += 1
-        r["native_hourly_commitment"] += float(n.get("hourly_commitment") or 0)
-        r["native_quantity"] += float(n.get("quantity") or 0)
-        r["native_monthly_savings"] += float(n.get("estimated_monthly_savings") or 0)
-        lookbacks.add(n.get("lookback_days"))
+    lookbacks = {n.get("lookback_days") for n in native}
+    engine_options: dict[tuple[str, str], Counter] = defaultdict(Counter)
     for e in plan:
         r = row(e.provider, e.kind)
         r["engine_count"] += 1
         r["engine_hourly_commitment"] += e.hourly_commitment or 0
         r["engine_quantity"] += e.quantity or 0
         r["engine_monthly_savings"] += e.monthly_savings
+        engine_options[(e.provider, e.kind)][(e.term_months, e.payment_option)] += 1
+
+    # Providers return the same opportunity once per term/payment option asked for; those are
+    # alternatives, so only one option's recommendations are totalled: the one the engine
+    # mostly chose for this kind, else the one with the largest native savings.
+    by_option: dict[tuple[str, str], dict[tuple, list[dict[str, Any]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for n in native:
+        option = (n.get("term_months"), n.get("payment_option"), n.get("lookback_days"))
+        by_option[(n["provider"], n["kind"])][option].append(n)
+    for key, options in by_option.items():
+        preferred = [o for o, _ in engine_options[key].most_common()]
+        chosen = next(
+            (o for p in preferred for o in options if o[:2] == p),
+            max(options, key=lambda o, opts=options: _native_savings(opts[o])),
+        )
+        r = row(*key)
+        r["native_options"] = len(options)
+        r["native_term_months"], r["native_payment_option"] = chosen[0], chosen[1]
+        for n in options[chosen]:
+            r["native_count"] += 1
+            r["native_hourly_commitment"] += float(n.get("hourly_commitment") or 0)
+            r["native_quantity"] += float(n.get("quantity") or 0)
+            r["native_monthly_savings"] += float(n.get("estimated_monthly_savings") or 0)
     for r in rows.values():
         for key in list(r):
             if isinstance(r[key], float):

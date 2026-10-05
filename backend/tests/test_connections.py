@@ -105,7 +105,8 @@ def test_unavailable_services_become_warnings():
     ):
         factory(svc, region)
         clients[(svc, region)][1].add_response(op, {key: []})
-    # OpenSearch and MemoryDB aren't offered in this region
+    # OpenSearch's endpoint is unreachable; MemoryDB isn't offered here per botocore, so it's
+    # skipped without a call (its stub would raise if it were called).
     for svc in ("opensearch", "memorydb"):
         factory(svc, region)
     for svc, op in (
@@ -130,7 +131,8 @@ def test_unavailable_services_become_warnings():
     assert c.collect_commitments() == []
     text = " ".join(c.warnings)
     assert "rds:DescribeReservedDBInstances" in text
-    assert "opensearch" in text and "memorydb" in text
+    assert "opensearch" in text and "memorydb" not in text
+    assert not any(api.startswith("memorydb:") for api in c.stats.calls)
     # no savings plans: the 30 billed per-day utilization calls are skipped
     assert c.collect_utilization(date(2026, 9, 1), date(2026, 10, 1)) == []
     assert "ce:GetSavingsPlansUtilizationDetails" not in c.stats.calls
