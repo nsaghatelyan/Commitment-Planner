@@ -1,0 +1,22 @@
+{
+  "product": {"sku": "QG5G45WKDWDDHTFV", "productFamily": "Compute Instance",
+    "attributes": {"instanceType": "m5.xlarge", "regionCode": "us-east-1", "operatingSystem": "Windows",
+      "preInstalledSw": "SQL Std", "tenancy": "Shared", "capacitystatus": "Used",
+      "usagetype": "BoxUsage:m5.xlarge", "licenseModel": "No License required"}},
+  "serviceCode": "AmazonEC2",
+  "terms": {
+    "OnDemand": {"QG5G45WKDWDDHTFV.JRTCKXETXF": {"priceDimensions": {
+      "QG5G45WKDWDDHTFV.JRTCKXETXF.6YS6EN2CT7": {"unit": "Hrs", "pricePerUnit": {"USD": "1.1520000000"}}}}},
+    "Reserved": {
+      "QG5G45WKDWDDHTFV.6QCMYABX3D": {"termAttributes": {"LeaseContractLength": "1yr",
+          "OfferingClass": "standard", "PurchaseOption": "All Upfront"},
+        "priceDimensions": {
+          "a": {"unit": "Quantity", "pricePerUnit": {"USD": "8760"}},
+          "b": {"unit": "Hrs", "pricePerUnit": {"USD": "0.0000000000"}}}},
+      "QG5G45WKDWDDHTFV.4NA7Y494T4": {"termAttributes": {"LeaseContractLength": "3yr",
+          "OfferingClass": "convertible", "PurchaseOption": "No Upfront"},
+        "priceDimensions": {
+          "c": {"unit": "Hrs", "pricePerUnit": {"USD": "0.7500000000"}}}}
+    }
+  }
+}

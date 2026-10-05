@@ -1,0 +1,35 @@
+{
+  "GroupDefinitions": [{"Type": "DIMENSION", "Key": "SERVICE"}],
+  "ResultsByTime": [
+    {
+      "TimePeriod": {"Start": "2026-09-01", "End": "2026-09-02"},
+      "Total": {},
+      "Groups": [
+        {"Keys": ["Amazon Elastic Compute Cloud - Compute"], "Metrics": {
+          "AmortizedCost": {"Amount": "412.55", "Unit": "USD"},
+          "UnblendedCost": {"Amount": "398.10", "Unit": "USD"},
+          "UsageQuantity": {"Amount": "2160", "Unit": "N/A"},
+          "NormalizedUsageAmount": {"Amount": "15400", "Unit": "N/A"}}},
+        {"Keys": ["Amazon Simple Storage Service"], "Metrics": {
+          "AmortizedCost": {"Amount": "21.40", "Unit": "USD"},
+          "UnblendedCost": {"Amount": "21.40", "Unit": "USD"},
+          "UsageQuantity": {"Amount": "88000", "Unit": "N/A"},
+          "NormalizedUsageAmount": {"Amount": "0", "Unit": "N/A"}}}
+      ],
+      "Estimated": false
+    },
+    {
+      "TimePeriod": {"Start": "2026-09-02", "End": "2026-09-03"},
+      "Total": {},
+      "Groups": [
+        {"Keys": ["Amazon Elastic Compute Cloud - Compute"], "Metrics": {
+          "AmortizedCost": {"Amount": "409.02", "Unit": "USD"},
+          "UnblendedCost": {"Amount": "395.77", "Unit": "USD"},
+          "UsageQuantity": {"Amount": "2150", "Unit": "N/A"},
+          "NormalizedUsageAmount": {"Amount": "15320", "Unit": "N/A"}}}
+      ],
+      "Estimated": false
+    }
+  ],
+  "DimensionValueAttributes": []
+}

@@ -6,7 +6,6 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
-    Index,
     Numeric,
     String,
     Text,
@@ -48,7 +47,8 @@ class User(IdMixin, TimestampMixin, Base):
 
 
 class CloudConnection(IdMixin, TimestampMixin, Base):
-    """How we reach a client's cloud: an AWS role to assume, or an Azure service principal."""
+    """How we reach a client's cloud: an AWS role to assume, or an Azure billing scope that our
+    multi-tenant Entra app has been granted. No client secrets are stored."""
 
     __tablename__ = "cloud_connection"
 
@@ -56,15 +56,21 @@ class CloudConnection(IdMixin, TimestampMixin, Base):
     provider: Mapped[str] = mapped_column(String(16), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     # AWS
-    role_arn: Mapped[str | None] = mapped_column(String(2048))
-    external_id: Mapped[str | None] = mapped_column(String(256))
+    aws_role_arn: Mapped[str | None] = mapped_column(String(2048))
+    aws_external_id: Mapped[str | None] = mapped_column(String(256), unique=True)
+    aws_export_bucket: Mapped[str | None] = mapped_column(String(255))
+    aws_export_prefix: Mapped[str | None] = mapped_column(String(1024))
     # Azure
     azure_tenant_id: Mapped[str | None] = mapped_column(String(64))
-    azure_client_id: Mapped[str | None] = mapped_column(String(64))
-    # Reference to the secret in the secrets store; the secret itself is never stored here.
-    credential_secret_ref: Mapped[str | None] = mapped_column(String(2048))
+    # ea | mca | payg | csp
+    azure_agreement_type: Mapped[str | None] = mapped_column(String(8))
+    azure_billing_scope: Mapped[str | None] = mapped_column(String(1024))
+    # https://<account>.blob.core.windows.net/<container>[/<prefix>]
+    azure_export_container: Mapped[str | None] = mapped_column(String(2048))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
 
 
 class CloudAccount(IdMixin, TimestampMixin, Base):
@@ -87,38 +93,54 @@ class Commitment(IdMixin, TimestampMixin, Base):
     """An existing savings plan or reservation the client already owns."""
 
     __tablename__ = "commitment"
-    __table_args__ = (UniqueConstraint("cloud_account_id", "external_id"),)
+    __table_args__ = (UniqueConstraint("cloud_connection_id", "provider_commitment_id"),)
 
     tenant_id: Mapped[uuid.UUID] = tenant_fk()
-    cloud_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("cloud_account.id", ondelete="CASCADE"), nullable=False
+    cloud_connection_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cloud_connection.id", ondelete="CASCADE"), nullable=False
+    )
+    # Owning account/subscription when known; org- or billing-scope commitments may have none.
+    cloud_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cloud_account.id", ondelete="SET NULL")
     )
     provider: Mapped[str] = mapped_column(String(16), nullable=False)
-    # e.g. compute_savings_plan, ec2_instance_sp, reserved_instance, azure_reservation, azure_savings_plan
-    commitment_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    external_id: Mapped[str] = mapped_column(String(256), nullable=False)
-    term_months: Mapped[int] = mapped_column(nullable=False)
-    payment_option: Mapped[str | None] = mapped_column(String(32))
-    hourly_commitment: Mapped[Decimal | None] = mapped_column(MONEY)
-    quantity: Mapped[int | None]
+    # aws_sp_compute | aws_sp_ec2 | aws_sp_sagemaker | aws_sp_database | aws_ri
+    # | azure_sp_compute | azure_ri
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_commitment_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    # AWS: organization | Region | Availability Zone; Azure: Shared | Single | ManagementGroup
+    scope: Mapped[str | None] = mapped_column(String(64))
+    service: Mapped[str | None] = mapped_column(String(128))
     region: Mapped[str | None] = mapped_column(String(64))
     instance_family: Mapped[str | None] = mapped_column(String(64))
+    instance_type: Mapped[str | None] = mapped_column(String(64))
+    quantity: Mapped[int | None]
+    # Savings plans: the hourly commitment.
+    hourly_commitment: Mapped[Decimal | None] = mapped_column(MONEY)
+    term_months: Mapped[int] = mapped_column(nullable=False)
+    payment_option: Mapped[str | None] = mapped_column(String(32))
     start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Totals for the whole commitment (all units).
+    upfront_cost: Mapped[Decimal | None] = mapped_column(MONEY)
+    recurring_hourly_cost: Mapped[Decimal | None] = mapped_column(MONEY)
+    # Upfront spread over the term plus recurring: Used + Unused effective cost per hour.
+    amortized_hourly_cost: Mapped[Decimal | None] = mapped_column(MONEY)
+    state: Mapped[str | None] = mapped_column(String(32))
     attributes: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
 
 class CommitmentUtilization(IdMixin, Base):
     __tablename__ = "commitment_utilization"
-    __table_args__ = (UniqueConstraint("commitment_id", "usage_date"),)
+    __table_args__ = (UniqueConstraint("commitment_id", "date"),)
 
     commitment_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("commitment.id", ondelete="CASCADE"), nullable=False
     )
-    usage_date: Mapped[date] = mapped_column(Date, nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
     utilization_pct: Mapped[Decimal] = mapped_column(Numeric(7, 4), nullable=False)
+    unused_cost: Mapped[Decimal | None] = mapped_column(MONEY)
     used_amount: Mapped[Decimal | None] = mapped_column(MONEY)
-    unused_amount: Mapped[Decimal | None] = mapped_column(MONEY)
     net_savings: Mapped[Decimal | None] = mapped_column(MONEY)
 
 
@@ -127,30 +149,33 @@ class Price(IdMixin, Base):
 
     __tablename__ = "price"
     __table_args__ = (
-        Index(
-            "ix_price_lookup",
+        UniqueConstraint(
             "provider",
-            "service",
+            "sku_key",
             "region",
-            "sku",
             "pricing_model",
             "term_months",
             "payment_option",
+            "effective_from",
+            name="uq_price_identity",
+            postgresql_nulls_not_distinct=True,
         ),
     )
 
     provider: Mapped[str] = mapped_column(String(16), nullable=False)
     service: Mapped[str] = mapped_column(String(64), nullable=False)
+    # See app.pricing.keys for the per-provider conventions.
+    sku_key: Mapped[str] = mapped_column(String(256), nullable=False)
     region: Mapped[str] = mapped_column(String(64), nullable=False)
-    sku: Mapped[str] = mapped_column(String(256), nullable=False)
-    # on_demand | savings_plan | reservation
-    pricing_model: Mapped[str] = mapped_column(String(32), nullable=False)
+    # on_demand | sp | ri
+    pricing_model: Mapped[str] = mapped_column(String(16), nullable=False)
     term_months: Mapped[int | None]
     payment_option: Mapped[str | None] = mapped_column(String(32))
     unit: Mapped[str] = mapped_column(String(32), nullable=False)
-    price_per_unit: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    # Per unit (per hour for compute). For ri/sp, upfront is amortized into the rate.
+    price_per_unit: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
-    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    effective_from: Mapped[date] = mapped_column(Date, nullable=False)
     attributes: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
 
@@ -166,7 +191,11 @@ class CollectionRun(IdMixin, TimestampMixin, Base):
     period_end: Mapped[date] = mapped_column(Date, nullable=False)
     # Where this run's Parquet files live (local dir or s3:// prefix).
     usage_location: Mapped[str | None] = mapped_column(String(2048))
-    rows_collected: Mapped[int | None]
+    rows_ingested: Mapped[int | None]
+    # Provider API calls actually sent (cache hits excluded); Cost Explorer bills $0.01 each.
+    api_calls: Mapped[int | None]
+    # Per-API call counts, cache hits, sources used, warnings.
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)

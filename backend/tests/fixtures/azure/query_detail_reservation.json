@@ -1,0 +1,14 @@
+{
+  "properties": {
+    "nextLink": null,
+    "columns": [
+      {"name": "Cost", "type": "Number"}, {"name": "UsageQuantity", "type": "Number"},
+      {"name": "UsageDate", "type": "Number"}, {"name": "MeterId", "type": "String"},
+      {"name": "ChargeType", "type": "String"}, {"name": "Currency", "type": "String"}
+    ],
+    "rows": [
+      [1.8432, 24, 20260901, "9f1e2d3c-0000-4000-8000-00000000d4s3", "Usage", "USD"],
+      [0.4, 0, 20260901, "9f1e2d3c-0000-4000-8000-00000000d4s3", "UnusedReservation", "USD"]
+    ]
+  }
+}

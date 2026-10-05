@@ -1,0 +1,9 @@
+{"value": [
+  {"id": "/providers/Microsoft.BillingBenefits/savingsPlanOrders/cccc3333-0000-0000-0000-000000000003/savingsPlans/dddd4444-0000-0000-0000-000000000004",
+   "name": "dddd4444-0000-0000-0000-000000000004",
+   "properties": {"displayName": "compute-sp", "provisioningState": "Succeeded",
+     "billingScopeId": "/subscriptions/3f2a1b0c-1111-2222-3333-444455556666",
+     "commitment": {"grain": "Hourly", "currencyCode": "USD", "amount": 2.5},
+     "term": "P3Y", "billingPlan": "P1M", "appliedScopeType": "Shared",
+     "benefitStartTime": "2025-06-01T00:00:00Z", "expiryDateTime": "2028-06-01T00:00:00Z"}}
+], "nextLink": null}

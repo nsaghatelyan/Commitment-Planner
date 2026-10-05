@@ -1,11 +1,25 @@
-"""Background jobs. Each one is a stub until its phase lands."""
+"""Background jobs (arq). Collection and price sync are blocking, so they run in a thread."""
 
+import asyncio
 from typing import Any
 
+from app.db import SessionLocal
 
-async def collect_usage(ctx: dict[str, Any], cloud_connection_id: str) -> None:
-    """Pull usage and commitments for one connection and write Parquet. Records a collection_run."""
-    raise NotImplementedError
+DEFAULT_AWS_PRICE_REGIONS = ("us-east-1", "us-east-2", "us-west-2", "eu-west-1", "eu-central-1")
+DEFAULT_AZURE_PRICE_REGIONS = ("eastus", "eastus2", "westus2", "westeurope", "northeurope")
+
+
+def _collect(cloud_connection_id: str) -> dict[str, Any]:
+    from app.services.collection import run_collection
+
+    with SessionLocal() as session:
+        run = run_collection(session, cloud_connection_id)
+        return {"run_id": str(run.id), "status": run.status, "rows": run.rows_ingested}
+
+
+async def collect_usage(ctx: dict[str, Any], cloud_connection_id: str) -> dict[str, Any]:
+    """Pull usage, commitments, utilization and native recommendations for one connection."""
+    return await asyncio.to_thread(_collect, cloud_connection_id)
 
 
 async def run_analysis(ctx: dict[str, Any], tenant_id: str) -> None:
@@ -13,6 +27,43 @@ async def run_analysis(ctx: dict[str, Any], tenant_id: str) -> None:
     raise NotImplementedError
 
 
-async def refresh_prices(ctx: dict[str, Any]) -> None:
-    """Refresh the price table from AWS and Azure public pricing."""
-    raise NotImplementedError
+def _refresh_prices(aws_regions: list[str], azure_regions: list[str]) -> dict[str, int]:
+    import boto3
+
+    from app.collectors.azure.http import AzureHttp
+    from app.collectors.cache import CountingCaller
+    from app.collectors.types import CallStats
+    from app.pricing import aws, azure
+    from app.services.pricing import upsert_prices
+    from app.timeutil import utc_today
+
+    today = utc_today()
+    call = CountingCaller(CallStats())
+    pricing = boto3.client("pricing", region_name="us-east-1")
+    savingsplans = boto3.client("savingsplans", region_name="us-east-1")
+    counts = {}
+    with SessionLocal() as session:
+        for code in aws.SERVICE_CODES:
+            counts[code] = upsert_prices(
+                session, aws.on_demand_and_ri_prices(pricing, call, code, aws_regions, today)
+            )
+        counts["aws_sp"] = upsert_prices(
+            session, aws.savings_plan_rates(savingsplans, call, aws_regions, today)
+        )
+        counts["azure"] = upsert_prices(
+            session, azure.retail_prices(AzureHttp(None), call, azure_regions, today=today)
+        )
+    return counts
+
+
+async def refresh_prices(
+    ctx: dict[str, Any],
+    aws_regions: list[str] | None = None,
+    azure_regions: list[str] | None = None,
+) -> dict[str, int]:
+    """Refresh the price table from the AWS Pricing API and the Azure Retail Prices API."""
+    return await asyncio.to_thread(
+        _refresh_prices,
+        list(aws_regions or DEFAULT_AWS_PRICE_REGIONS),
+        list(azure_regions or DEFAULT_AZURE_PRICE_REGIONS),
+    )

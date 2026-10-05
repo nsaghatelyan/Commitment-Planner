@@ -17,6 +17,7 @@ htmlcov/
 # Local usage data (Parquet)
 backend/data/
 *.parquet
+!backend/tests/fixtures/**/*.parquet
 
 # Node / Next.js
 node_modules/

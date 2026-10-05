@@ -3,6 +3,8 @@ Description: >
   Read-only IAM role that lets the savings tool read cost, usage and commitment data.
   Deploy in the client's payer (management) account. The role can be assumed only by
   the tool's AWS account and only with the ExternalId issued for this client.
+  Optionally creates an hourly Data Export (FOCUS 1.0 or CUR 2.0, Parquet) into a new
+  S3 bucket in the client's account; that option requires deploying in us-east-1.
 
 Parameters:
   ToolAccountId:
@@ -18,17 +20,155 @@ Parameters:
   RoleName:
     Type: String
     Default: SavingsToolReadOnly
-  CurBucketName:
+  ExportBucketName:
     Type: String
     Default: ""
-    Description: Optional. S3 bucket holding the Cost and Usage Report (CUR 2.0 / Data Exports).
+    Description: >
+      Optional. Existing bucket that already receives a Data Export (FOCUS 1.0 or CUR 2.0).
+      Leave empty when CreateDataExport is true (a bucket is created) or when there is no export.
+  CreateDataExport:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: Create an hourly Parquet Data Export and a bucket for it (us-east-1 only).
+  DataExportFormat:
+    Type: String
+    AllowedValues: [FOCUS_1_0, CUR_2_0]
+    Default: FOCUS_1_0
+  DataExportPrefix:
+    Type: String
+    Default: savings-tool
 
 Conditions:
-  HasCurBucket: !Not [!Equals [!Ref CurBucketName, ""]]
+  CreateExport: !Equals [!Ref CreateDataExport, "true"]
+  ExportIsFocus: !Equals [!Ref DataExportFormat, FOCUS_1_0]
+  HasExistingBucket: !Not [!Equals [!Ref ExportBucketName, ""]]
+  HasExportBucket: !Or [!Condition CreateExport, !Condition HasExistingBucket]
+
+Rules:
+  DataExportsOnlyInUsEast1:
+    RuleCondition: !Equals [!Ref CreateDataExport, "true"]
+    Assertions:
+      - Assert: !Equals [!Ref "AWS::Region", us-east-1]
+        AssertDescription: Data Exports must be created in us-east-1.
 
 Resources:
+  ExportBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateExport
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "savings-tool-export-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldExports
+            Status: Enabled
+            ExpirationInDays: 800
+
+  ExportBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateExport
+    Properties:
+      Bucket: !Ref ExportBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowDataExportsDelivery
+            Effect: Allow
+            Principal:
+              Service:
+                - bcm-data-exports.amazonaws.com
+                - billingreports.amazonaws.com
+            Action:
+              - s3:PutObject
+              - s3:GetBucketPolicy
+            Resource:
+              - !GetAtt ExportBucket.Arn
+              - !Sub "${ExportBucket.Arn}/*"
+            Condition:
+              StringLike:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceArn:
+                  - !Sub "arn:${AWS::Partition}:cur:us-east-1:${AWS::AccountId}:definition/*"
+                  - !Sub "arn:${AWS::Partition}:bcm-data-exports:us-east-1:${AWS::AccountId}:export/*"
+
+  DataExport:
+    Type: AWS::BCMDataExports::Export
+    Condition: CreateExport
+    DependsOn: ExportBucketPolicy
+    Properties:
+      Export:
+        Name: savings-tool
+        Description: Hourly usage for the savings tool
+        DataQuery:
+          QueryStatement: !If
+            - ExportIsFocus
+            - >-
+              SELECT AvailabilityZone, BilledCost, BillingAccountId, BillingAccountName,
+              BillingCurrency, BillingPeriodEnd, BillingPeriodStart, ChargeCategory, ChargeClass,
+              ChargeDescription, ChargeFrequency, ChargePeriodEnd, ChargePeriodStart,
+              CommitmentDiscountCategory, CommitmentDiscountId, CommitmentDiscountName,
+              CommitmentDiscountStatus, CommitmentDiscountType, ConsumedQuantity, ConsumedUnit,
+              ContractedCost, ContractedUnitPrice, EffectiveCost, InvoiceIssuerName, ListCost,
+              ListUnitPrice, PricingCategory, PricingQuantity, PricingUnit, ProviderName,
+              PublisherName, RegionId, RegionName, ResourceId, ResourceName, ResourceType,
+              ServiceCategory, ServiceName, SkuId, SkuPriceId, SubAccountId, SubAccountName, Tags,
+              x_CostCategories, x_Discounts, x_Operation, x_ServiceCode, x_UsageType
+              FROM FOCUS_1_0_AWS
+            - >-
+              SELECT bill_payer_account_id, line_item_usage_account_id,
+              line_item_usage_account_name, line_item_line_item_type, line_item_usage_start_date,
+              line_item_usage_end_date, line_item_product_code, line_item_usage_type,
+              line_item_operation, line_item_resource_id, line_item_usage_amount,
+              line_item_normalized_usage_amount, line_item_unblended_cost, product_sku,
+              product_region_code, product_product_family, product_instance_type,
+              product_instance_family, product_operating_system, product_tenancy,
+              product_database_engine, product_deployment_option, product, pricing_term,
+              pricing_unit, pricing_public_on_demand_cost, savings_plan_savings_plan_a_r_n,
+              savings_plan_savings_plan_effective_cost, savings_plan_total_commitment_to_date,
+              savings_plan_used_commitment, reservation_reservation_a_r_n,
+              reservation_effective_cost,
+              reservation_unused_amortized_upfront_fee_for_billing_period,
+              reservation_unused_recurring_fee, resource_tags
+              FROM COST_AND_USAGE_REPORT
+          TableConfigurations: !If
+            - ExportIsFocus
+            - !Ref AWS::NoValue
+            - COST_AND_USAGE_REPORT:
+                TIME_GRANULARITY: HOURLY
+                INCLUDE_RESOURCES: "TRUE"
+                INCLUDE_SPLIT_COST_ALLOCATION_DATA: "FALSE"
+                INCLUDE_MANUAL_DISCOUNT_COMPATIBILITY: "FALSE"
+        DestinationConfigurations:
+          S3Destination:
+            S3Bucket: !Ref ExportBucket
+            S3Prefix: !Ref DataExportPrefix
+            S3Region: us-east-1
+            S3OutputConfigurations:
+              Compression: PARQUET
+              Format: PARQUET
+              OutputType: CUSTOM
+              Overwrite: OVERWRITE_REPORT
+        RefreshCadence:
+          Frequency: SYNCHRONOUS
+
   SavingsToolRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn-lint:
+        config:
+          # The bucket ARN branch is only used when ExportBucketName is non-empty.
+          ignore_checks: [W1031]
     Properties:
       RoleName: !Ref RoleName
       MaxSessionDuration: 3600
@@ -50,15 +190,22 @@ Resources:
               - Sid: CostExplorerRead
                 Effect: Allow
                 Action:
-                  - ce:Get*
-                  - ce:Describe*
-                  - ce:List*
+                  - ce:GetCostAndUsage
+                  - ce:GetCostAndUsageWithResources
+                  - ce:GetDimensionValues
+                  - ce:GetReservationUtilization
+                  - ce:GetReservationCoverage
+                  - ce:GetReservationPurchaseRecommendation
+                  - ce:GetSavingsPlansUtilization
+                  - ce:GetSavingsPlansUtilizationDetails
+                  - ce:GetSavingsPlansCoverage
+                  - ce:GetSavingsPlansPurchaseRecommendation
                 Resource: "*"
               - Sid: CommitmentsRead
                 Effect: Allow
                 Action:
-                  - savingsplans:Describe*
-                  - savingsplans:List*
+                  - savingsplans:DescribeSavingsPlans
+                  - savingsplans:DescribeSavingsPlansOfferingRates
                   - ec2:DescribeReservedInstances
                   - ec2:DescribeReservedInstancesModifications
                   - ec2:DescribeRegions
@@ -67,8 +214,9 @@ Resources:
                   - redshift:DescribeReservedNodes
                   - es:DescribeReservedInstances
                   - memorydb:DescribeReservedNodes
+                  - dynamodb:DescribeReservedCapacity
                 Resource: "*"
-              - Sid: OrganizationRead
+              - Sid: OrganizationAndExportsRead
                 Effect: Allow
                 Action:
                   - organizations:DescribeOrganization
@@ -79,22 +227,36 @@ Resources:
                   - bcm-data-exports:GetExport
                 Resource: "*"
         - !If
-          - HasCurBucket
-          - PolicyName: SavingsToolCurBucketRead
+          - HasExportBucket
+          - PolicyName: SavingsToolExportBucketRead
             PolicyDocument:
               Version: "2012-10-17"
               Statement:
                 - Effect: Allow
                   Action:
-                    - s3:GetObject
                     - s3:ListBucket
                     - s3:GetBucketLocation
-                  Resource:
-                    - !Sub "arn:${AWS::Partition}:s3:::${CurBucketName}"
-                    - !Sub "arn:${AWS::Partition}:s3:::${CurBucketName}/*"
+                  Resource: !If
+                    - CreateExport
+                    - !GetAtt ExportBucket.Arn
+                    - !Sub "arn:${AWS::Partition}:s3:::${ExportBucketName}"
+                - Effect: Allow
+                  Action: s3:GetObject
+                  Resource: !If
+                    - CreateExport
+                    - !Sub "${ExportBucket.Arn}/*"
+                    - !Sub "arn:${AWS::Partition}:s3:::${ExportBucketName}/*"
           - !Ref AWS::NoValue
 
 Outputs:
   RoleArn:
     Description: Paste this into the savings tool when adding the AWS connection.
     Value: !GetAtt SavingsToolRole.Arn
+  ExportBucket:
+    Condition: HasExportBucket
+    Description: Bucket the tool reads the Data Export from (aws_export_bucket).
+    Value: !If [CreateExport, !Ref ExportBucket, !Ref ExportBucketName]
+  ExportPrefix:
+    Condition: CreateExport
+    Description: Prefix of the Data Export inside the bucket (aws_export_prefix).
+    Value: !Sub "${DataExportPrefix}/savings-tool"

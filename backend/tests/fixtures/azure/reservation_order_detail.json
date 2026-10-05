@@ -1,0 +1,6 @@
+{"id": "/providers/Microsoft.Capacity/reservationOrders/aaaa1111-0000-0000-0000-000000000001",
+ "name": "aaaa1111-0000-0000-0000-000000000001",
+ "properties": {"displayName": "D4s_v3 eastus", "term": "P1Y", "billingPlan": "Upfront", "originalQuantity": 4,
+   "benefitStartTime": "2026-03-01T00:00:00Z", "expiryDateTime": "2027-03-01T00:00:00Z",
+   "planInformation": {"pricingCurrencyTotal": {"currencyCode": "USD", "amount": 4036.0},
+     "startDate": "2026-03-01", "transactions": []}}}

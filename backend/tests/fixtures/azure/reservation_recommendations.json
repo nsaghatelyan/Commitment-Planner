@@ -1,0 +1,12 @@
+{"value": [
+  {"id": "r1", "name": "r1", "type": "Microsoft.Consumption/reservationRecommendations",
+   "kind": "modern", "location": "eastus", "sku": "Standard_D4s_v3",
+   "properties": {"lookBackPeriod": "Last30Days", "meterId": "9f1e2d3c-0000-4000-8000-00000000d4s3",
+     "term": "P1Y", "scope": "Shared", "resourceType": "virtualmachines",
+     "recommendedQuantity": 3, "skuName": "Standard_D4s_v3", "location": "eastus",
+     "netSavings": {"currency": "USD", "value": 150.0},
+     "costWithNoReservedInstances": {"currency": "USD", "value": 420.0}}},
+  {"id": "r2", "name": "r2", "kind": "legacy", "location": "westeurope", "sku": "Standard_E8s_v3",
+   "properties": {"lookBackPeriod": "Last30Days", "term": "P1Y", "scope": "Shared",
+     "recommendedQuantity": 2, "netSavings": 90.0}}
+], "nextLink": null}

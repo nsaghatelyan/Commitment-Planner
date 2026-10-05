@@ -13,16 +13,18 @@ dependencies = [
     "redis>=5.0",
     "arq>=0.26",
     "duckdb>=1.1",
+    "pytz>=2024.1",  # duckdb needs it to return timestamptz values to Python
     "pyarrow>=17",
     "boto3>=1.35",
+    "httpx>=0.27",
     "azure-identity>=1.17",
-    "azure-mgmt-costmanagement>=4.0",
+    "azure-storage-blob>=12.20",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
-    "httpx>=0.27",
+    "moto[s3,sts,organizations]>=5.0",
     "ruff>=0.6",
 ]
 
@@ -35,6 +37,8 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["db: needs the docker-compose Postgres (skipped when unreachable)"]
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]
 
 [tool.ruff]
 line-length = 100

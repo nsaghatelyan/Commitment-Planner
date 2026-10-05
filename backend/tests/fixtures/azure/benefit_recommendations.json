@@ -1,0 +1,7 @@
+{"value": [
+  {"id": "rec-1", "kind": "SharedScope", "name": "rec-1",
+   "properties": {"lookBackPeriod": "Last30Days", "term": "P3Y", "commitmentGranularity": "Hourly",
+     "currencyCode": "USD", "costWithoutBenefit": 7200.0, "scope": "Shared",
+     "recommendationDetails": {"commitmentAmount": 3.1, "averageUtilizationPercentage": 98.2,
+       "coveragePercentage": 71.0, "totalCost": 4600.0, "savingsAmount": 2600.0, "savingsPercentage": 36.1}}}
+], "nextLink": null}

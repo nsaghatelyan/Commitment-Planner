@@ -1,0 +1,10 @@
+{"value": [
+  {"id": "/providers/Microsoft.Capacity/reservationOrders/aaaa1111-0000-0000-0000-000000000001/reservations/bbbb2222-0000-0000-0000-000000000002",
+   "name": "aaaa1111-0000-0000-0000-000000000001/bbbb2222-0000-0000-0000-000000000002",
+   "location": "eastus", "sku": {"name": "Standard_D4s_v3"},
+   "properties": {"reservedResourceType": "VirtualMachines", "displayName": "D4s_v3 eastus",
+     "appliedScopeType": "Shared", "quantity": 4, "provisioningState": "Succeeded",
+     "benefitStartTime": "2026-03-01T00:00:00Z", "expiryDateTimeUtc": "2027-03-01T00:00:00Z",
+     "term": "P1Y", "billingPlan": "Upfront", "instanceFlexibility": "On",
+     "utilization": {"trend": "SAME", "aggregates": [{"grain": 30, "grainUnit": "days", "value": 82}]}}}
+], "nextLink": null}

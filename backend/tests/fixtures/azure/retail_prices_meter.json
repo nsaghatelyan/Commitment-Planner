@@ -1,0 +1,28 @@
+{
+  "BillingCurrency": "USD", "CustomerEntityId": "Default", "CustomerEntityType": "Retail",
+  "Items": [
+    {"currencyCode": "USD", "tierMinimumUnits": 0.0, "retailPrice": 0.192, "unitPrice": 0.192,
+     "armRegionName": "eastus", "location": "US East", "effectiveStartDate": "2020-01-01T00:00:00Z",
+     "meterId": "9f1e2d3c-0000-4000-8000-00000000d4s3", "meterName": "D4s v3", "productId": "DZH318Z0BQPS",
+     "skuId": "DZH318Z0BQPS/00TG", "productName": "Virtual Machines DSv3 Series", "skuName": "D4s v3",
+     "serviceName": "Virtual Machines", "serviceId": "DZH313Z7MMC8", "serviceFamily": "Compute",
+     "unitOfMeasure": "1 Hour", "type": "Consumption", "isPrimaryMeterRegion": true,
+     "armSkuName": "Standard_D4s_v3",
+     "savingsPlan": [{"unitPrice": 0.1152, "retailPrice": 0.1152, "term": "1 Year"},
+                     {"unitPrice": 0.0921, "retailPrice": 0.0921, "term": "3 Years"}]},
+    {"currencyCode": "USD", "tierMinimumUnits": 0.0, "retailPrice": 1009.0, "unitPrice": 1009.0,
+     "armRegionName": "eastus", "location": "US East", "effectiveStartDate": "2020-01-01T00:00:00Z",
+     "meterId": "9f1e2d3c-0000-4000-8000-00000000d4s3", "meterName": "D4s v3", "productId": "DZH318Z0BQPS",
+     "skuId": "DZH318Z0BQPS/00XY", "productName": "Virtual Machines DSv3 Series", "skuName": "D4s v3",
+     "serviceName": "Virtual Machines", "serviceId": "DZH313Z7MMC8", "serviceFamily": "Compute",
+     "unitOfMeasure": "1 Hour", "type": "Reservation", "reservationTerm": "1 Year",
+     "isPrimaryMeterRegion": true, "armSkuName": "Standard_D4s_v3"},
+    {"currencyCode": "USD", "tierMinimumUnits": 0.0, "retailPrice": 0.0384, "unitPrice": 0.0384,
+     "armRegionName": "eastus", "location": "US East", "effectiveStartDate": "2020-01-01T00:00:00Z",
+     "meterId": "1111aaaa-0000-4000-8000-00000000spot", "meterName": "D4s v3 Spot",
+     "productName": "Virtual Machines DSv3 Series", "skuName": "D4s v3 Spot",
+     "serviceName": "Virtual Machines", "serviceFamily": "Compute", "unitOfMeasure": "1 Hour",
+     "type": "Consumption", "armSkuName": "Standard_D4s_v3"}
+  ],
+  "NextPageLink": null, "Count": 3
+}

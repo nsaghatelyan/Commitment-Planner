@@ -1,0 +1,23 @@
+{
+  "GroupDefinitions": [{"Type": "DIMENSION", "Key": "USAGE_TYPE"}, {"Type": "DIMENSION", "Key": "OPERATION"}],
+  "ResultsByTime": [
+    {
+      "TimePeriod": {"Start": "2026-09-01", "End": "2026-09-02"},
+      "Total": {},
+      "Groups": [
+        {"Keys": ["USE1-BoxUsage:m5.xlarge", "RunInstances"], "Metrics": {
+          "AmortizedCost": {"Amount": "92.16", "Unit": "USD"},
+          "UnblendedCost": {"Amount": "92.16", "Unit": "USD"},
+          "UsageQuantity": {"Amount": "480", "Unit": "Hrs"},
+          "NormalizedUsageAmount": {"Amount": "3840", "Unit": "N/A"}}},
+        {"Keys": ["EUW1-BoxUsage:m5.large", "RunInstances:0002"], "Metrics": {
+          "AmortizedCost": {"Amount": "9.60", "Unit": "USD"},
+          "UnblendedCost": {"Amount": "9.60", "Unit": "USD"},
+          "UsageQuantity": {"Amount": "48", "Unit": "Hrs"},
+          "NormalizedUsageAmount": {"Amount": "192", "Unit": "N/A"}}}
+      ],
+      "Estimated": false
+    }
+  ],
+  "DimensionValueAttributes": []
+}

@@ -1,0 +1,27 @@
+{
+  "UtilizationsByTime": [
+    {
+      "TimePeriod": {"Start": "2026-09-01", "End": "2026-09-02"},
+      "Groups": [
+        {
+          "Key": "SUBSCRIPTION_ID", "Value": "7a6b5c4d-1111-2222-3333-444455556666",
+          "Attributes": {"leaseId": "7a6b5c4d-1111-2222-3333-444455556666", "accountId": "222222222222",
+            "region": "us-east-1", "instanceType": "m5.xlarge", "numberOfInstances": "4",
+            "startDateTime": "2025-03-01T00:00:00.000Z", "endDateTime": "2028-03-01T00:00:00.000Z",
+            "subscriptionStatus": "Active", "scope": "Region", "platform": "Linux/UNIX"},
+          "Utilization": {"UtilizationPercentage": "75", "PurchasedHours": "96", "UnusedHours": "24",
+            "TotalAmortizedFee": "11.52", "NetRISavings": "6.91"}
+        },
+        {
+          "Key": "SUBSCRIPTION_ID", "Value": "dynamo-res-0001",
+          "Attributes": {"leaseId": "dynamo-res-0001", "accountId": "333333333333",
+            "region": "us-east-1", "numberOfInstances": "100",
+            "startDateTime": "2026-01-01T00:00:00.000Z", "endDateTime": "2027-01-01T00:00:00.000Z",
+            "subscriptionStatus": "Active", "subscriptionType": "Amazon DynamoDB"},
+          "Utilization": {"UtilizationPercentage": "100", "PurchasedHours": "2400", "UnusedHours": "0",
+            "TotalAmortizedFee": "3.10", "NetRISavings": "4.00"}
+        }
+      ]
+    }
+  ]
+}

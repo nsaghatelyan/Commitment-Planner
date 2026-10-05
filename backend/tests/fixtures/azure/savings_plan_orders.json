@@ -1,0 +1,4 @@
+{"value": [
+  {"id": "/providers/Microsoft.BillingBenefits/savingsPlanOrders/cccc3333-0000-0000-0000-000000000003",
+   "name": "cccc3333-0000-0000-0000-000000000003", "properties": {"displayName": "compute-sp", "term": "P3Y", "billingPlan": "P1M"}}
+], "nextLink": null}

@@ -1,0 +1,19 @@
+{
+  "id": "/providers/Microsoft.Billing/billingAccounts/84251234/providers/Microsoft.CostManagement/query/0f6c7d2a",
+  "name": "0f6c7d2a", "type": "Microsoft.CostManagement/query",
+  "properties": {
+    "nextLink": null,
+    "columns": [
+      {"name": "Cost", "type": "Number"}, {"name": "UsageQuantity", "type": "Number"},
+      {"name": "UsageDate", "type": "Number"}, {"name": "ServiceName", "type": "String"},
+      {"name": "Currency", "type": "String"}
+    ],
+    "rows": [
+      [310.25, 1920, 20260901, "Virtual Machines", "USD"],
+      [1200.0, 0, 20260901, "Reserved VM Instances", "USD"],
+      [42.10, 51000, 20260901, "Storage", "USD"],
+      [305.90, 1900, 20260902, "Virtual Machines", "USD"],
+      [41.80, 50500, 20260902, "Storage", "USD"]
+    ]
+  }
+}

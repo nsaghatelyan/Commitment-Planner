@@ -1,0 +1,10 @@
+{"value": [
+  {"kind": "Reservation", "id": "x1", "name": "x1",
+   "properties": {"benefitId": "/providers/Microsoft.Capacity/reservationOrders/aaaa1111-0000-0000-0000-000000000001/reservations/bbbb2222-0000-0000-0000-000000000002",
+     "benefitOrderId": "aaaa1111-0000-0000-0000-000000000001", "benefitType": "Reservation",
+     "usageDate": "2026-09-01T00:00:00Z", "avgUtilizationPercentage": 80.0}},
+  {"kind": "SavingsPlan", "id": "x2", "name": "x2",
+   "properties": {"benefitId": "dddd4444-0000-0000-0000-000000000004",
+     "benefitOrderId": "cccc3333-0000-0000-0000-000000000003", "benefitType": "SavingsPlan",
+     "usageDate": "2026-09-01T00:00:00Z", "avgUtilizationPercentage": 96.5}}
+], "nextLink": null}
