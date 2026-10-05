@@ -22,9 +22,22 @@ async def collect_usage(ctx: dict[str, Any], cloud_connection_id: str) -> dict[s
     return await asyncio.to_thread(_collect, cloud_connection_id)
 
 
-async def run_analysis(ctx: dict[str, Any], tenant_id: str) -> None:
-    """Run the engine over stored usage and write recommendations. Records an analysis_run."""
-    raise NotImplementedError
+def _analyze(tenant_id: str, analysis_run_id: str | None, risk_profile: str | None):
+    from app.services.analysis import run_analysis as run
+
+    with SessionLocal() as session:
+        result = run(session, tenant_id, analysis_run_id=analysis_run_id, risk_profile=risk_profile)
+        return {"analysis_run_id": str(result.id), "status": result.status}
+
+
+async def run_analysis(
+    ctx: dict[str, Any],
+    tenant_id: str,
+    analysis_run_id: str | None = None,
+    risk_profile: str | None = None,
+) -> dict[str, Any]:
+    """Run the engine over stored usage and write recommendations to an analysis_run."""
+    return await asyncio.to_thread(_analyze, tenant_id, analysis_run_id, risk_profile)
 
 
 def _refresh_prices(aws_regions: list[str], azure_regions: list[str]) -> dict[str, int]:

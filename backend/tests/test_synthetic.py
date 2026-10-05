@@ -60,17 +60,22 @@ def test_large_profile_features(tenants):
     assert units == pytest.approx(16)
 
 
-def test_stranded_ri_after_migration():
-    large = generate("large", end=date(2026, 10, 1), days=40)
-    m4 = next(c for c in large.commitments if c.instance_type == "m4.xlarge")
+@pytest.fixture(scope="module")
+def large_155():
+    """Long enough to include the day-120 migration and the day-150 purchase."""
+    return generate("large", end=date(2026, 10, 1), days=155)
+
+
+def test_stranded_ri_after_migration(large_155):
+    m5 = next(c for c in large_155.commitments if c.instance_type == "m5.xlarge")
     util = {
         u.date: u.utilization_pct
-        for u in large.utilization
-        if u.provider_commitment_id == m4.provider_commitment_id
+        for u in large_155.utilization
+        if u.provider_commitment_id == m5.provider_commitment_id
     }
     days = sorted(util)
-    assert util[days[5]] == 100  # before day 30 the m4 fleet uses it fully
-    assert util[days[-1]] == 0  # after migrating to m6i it is stranded
+    assert util[days[100]] == 100  # before day 120 the m5 fleet uses it fully
+    assert util[days[-1]] == 0  # after migrating to m7i it is stranded
 
 
 def test_commitment_hour_invariant(tenants):
@@ -123,10 +128,9 @@ def test_row_conventions(tenants):
     assert split[0][0] > 0
 
 
-def test_upfront_purchase_inside_window():
-    large = generate("large", end=date(2026, 10, 1), days=60)
-    rows = _q(large, "SELECT max(billed_cost) FROM u WHERE charge_category = 'Purchase'")
-    # The 1-year all-upfront $0.8/h Compute SP bought on day 45.
+def test_upfront_purchase_inside_window(large_155):
+    rows = _q(large_155, "SELECT max(billed_cost) FROM u WHERE charge_category = 'Purchase'")
+    # The 1-year all-upfront $0.8/h Compute SP bought on day 150.
     assert rows[0][0] == pytest.approx(0.8 * 12 * 730, rel=1e-6)
 
 

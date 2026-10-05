@@ -1,5 +1,5 @@
 """Synthetic tenants: hourly normalized usage with commitments applied, plus the commitments,
-their daily utilization and matching prices.
+their daily utilization, matching prices and provider-style native recommendations.
 
 Commitments are applied each hour the way the clouds do it: reservations first, then
 savings plans (EC2 Instance SPs before Compute SPs on AWS), each SP covering the usage with the
@@ -25,8 +25,13 @@ from typing import Any
 import pyarrow as pa
 
 from app.collectors import types as k
-from app.collectors.types import AccountInfo, CommitmentRecord, UtilizationRecord
-from app.pricing.keys import aws_ec2_key, aws_rds_key, azure_key
+from app.collectors.types import (
+    AccountInfo,
+    CommitmentRecord,
+    NativeRecommendation,
+    UtilizationRecord,
+)
+from app.pricing.keys import usage_sku_key
 from app.pricing.types import PriceRecord
 from app.synthetic import catalog as cat
 from app.usage.normalize import instance_family
@@ -40,6 +45,11 @@ from app.usage.schema import (
 
 NAMESPACE = uuid.UUID("5b0f6a52-6f1e-4d55-9b52-1c3c6f0a7e11")
 EPS = 1e-9
+EC2 = "Amazon Elastic Compute Cloud - Compute"
+RDS = "Amazon Relational Database Service"
+CACHE = "Amazon ElastiCache"
+FARGATE = "Amazon Elastic Container Service"
+VM = "Virtual Machines"
 
 
 # --------------------------------------------------------------------------- model
@@ -74,11 +84,26 @@ class Resource:
     usage_unit: str = "Hrs"
     quantity: float = 1.0
     sp_eligible: bool = True
+    # Optional per-hour multiplier on quantity, units and cost (throughput that varies).
+    scale: Callable[[datetime], float] | None = None
     tags: dict[str, str] = field(default_factory=dict)
 
     @property
     def family(self) -> str | None:
         return instance_family(self.instance_type)
+
+    @property
+    def sku_key(self) -> str | None:
+        return usage_sku_key(
+            self.provider,
+            self.service_name,
+            self.instance_type,
+            self.operating_system,
+            self.tenancy,
+            self.database_engine,
+            self.deployment_option,
+            self.usage_unit,
+        )
 
 
 @dataclass
@@ -88,7 +113,7 @@ class SynthCommitment:
     ctype: CommitmentType
     amortized_hourly: float
     matches: Callable[[Resource], bool]
-    # Reservations: capacity in normalized units. Savings plans: discount per resource.
+    # Reservations: capacity in normalized units. Savings plans: discount.
     capacity_units: float = 0.0
     discount: float = 0.0
     priority: int = 0  # lower applies first among savings plans
@@ -119,6 +144,11 @@ class SyntheticTenant:
     utilization: list[UtilizationRecord]
     usage: pa.Table
     prices: list[PriceRecord]
+    native_recommendations: list[NativeRecommendation] = field(default_factory=list)
+
+    @property
+    def end(self) -> date:
+        return self.start + timedelta(days=self.days)
 
     def account_infos(self, provider: str) -> list[AccountInfo]:
         return [
@@ -138,6 +168,10 @@ def always(_: datetime) -> bool:
 
 def business_hours(h: datetime) -> bool:
     return h.weekday() < 5 and 8 <= h.hour < 20
+
+
+def nightly(start_hour: int, end_hour: int) -> Callable[[datetime], bool]:
+    return lambda h: start_hour <= h.hour < end_hour
 
 
 def autoscale(index: int, size: int, base: float, peak: float) -> Callable[[datetime], bool]:
@@ -177,11 +211,23 @@ class Builder:
         self.counter = 0
 
     def at(self, day: int, hour: int = 0) -> datetime:
+        """Hour `day` days after the window start (negative: before it)."""
         return self.t0 + timedelta(days=day, hours=hour)
+
+    def before_end(self, days: int) -> datetime:
+        return self.t1 - timedelta(days=days)
 
     def _rid(self, prefix: str) -> str:
         self.counter += 1
         return f"{prefix}{uuid.uuid5(NAMESPACE, f'{self.profile}:{self.counter}').hex[:17]}"
+
+    def _schedules(self, n, schedule, sched_factory, start=None, end=None, stagger=None):
+        out = []
+        for i in range(n):
+            sch = sched_factory(i) if sched_factory else (schedule or always)
+            s = stagger(i) if stagger else start
+            out.append(window(s, end, sch) if (s or end) else sch)
+        return out
 
     # ---- AWS resources
     def ec2(
@@ -197,19 +243,21 @@ class Builder:
         app="web",
         env="prod",
         sched_factory=None,
+        start=None,
+        end=None,
+        stagger=None,
     ):
         vcpu, od = cat.AWS_EC2[itype]
         if os == "Windows":
             od += cat.AWS_WINDOWS_PER_VCPU * vcpu
-        for i in range(n):
-            sch = sched_factory(i) if sched_factory else (schedule or always)
+        for i, sch in enumerate(self._schedules(n, schedule, sched_factory, start, end, stagger)):
             rid = self._rid("i-")
             self.resources.append(
                 Resource(
                     provider="aws",
                     account=acct,
                     region=region,
-                    service_name="Amazon Elastic Compute Cloud - Compute",
+                    service_name=EC2,
                     service_category="Compute",
                     resource_id=f"arn:aws:ec2:{region}:{acct.id}:instance/{rid}",
                     resource_name=f"{app}-{env}-{i + 1:02d}",
@@ -234,7 +282,7 @@ class Builder:
                     provider="aws",
                     account=acct,
                     region=region,
-                    service_name="Amazon Relational Database Service",
+                    service_name=RDS,
                     service_category="Databases",
                     resource_id=f"arn:aws:rds:{region}:{acct.id}:db:{name}",
                     resource_name=name,
@@ -249,17 +297,39 @@ class Builder:
                 )
             )
 
+    def cache(self, acct, region, node_type, n, app="cache"):
+        for i in range(n):
+            name = f"{app}-{i + 1:03d}"
+            self.resources.append(
+                Resource(
+                    provider="aws",
+                    account=acct,
+                    region=region,
+                    service_name=CACHE,
+                    service_category="Databases",
+                    resource_id=f"arn:aws:elasticache:{region}:{acct.id}:cluster:{name}",
+                    resource_name=name,
+                    od_hourly=cat.AWS_CACHE[node_type],
+                    units=cat.aws_size_factor(node_type),
+                    schedule=always,
+                    instance_type=node_type,
+                    database_engine="Redis",
+                    sp_eligible=False,
+                    tags={"app": app, "env": "prod"},
+                )
+            )
+
     def fargate(self, acct, region, vcpus, app="jobs", schedule=always):
         self.resources.append(
             Resource(
                 provider="aws",
                 account=acct,
                 region=region,
-                service_name="Amazon Elastic Container Service",
+                service_name=FARGATE,
                 service_category="Compute",
                 resource_id=f"arn:aws:ecs:{region}:{acct.id}:service/{app}",
                 resource_name=app,
-                od_hourly=0.04048 * vcpus,
+                od_hourly=cat.FARGATE_VCPU_HOUR * vcpus,
                 units=vcpus,
                 schedule=schedule,
                 usage_unit="vCPU-Hours",
@@ -282,19 +352,21 @@ class Builder:
         env="prod",
         spot=False,
         sched_factory=None,
+        start=None,
+        end=None,
+        stagger=None,
     ):
         vcpu, od = cat.AZURE_VM[size]
         if os == "Windows":
             od += cat.AZURE_WINDOWS_PER_VCPU * vcpu
-        for i in range(n):
-            sch = sched_factory(i) if sched_factory else (schedule or always)
+        for i, sch in enumerate(self._schedules(n, schedule, sched_factory, start, end, stagger)):
             name = f"vm-{app}-{env}-{i + 1:02d}"
             self.resources.append(
                 Resource(
                     provider="azure",
                     account=sub,
                     region=region,
-                    service_name="Virtual Machines",
+                    service_name=VM,
                     service_category="Compute",
                     resource_id=(
                         f"/subscriptions/{sub.id}/resourceGroups/rg-{app}-{env}/providers/"
@@ -312,8 +384,36 @@ class Builder:
                 )
             )
 
+    def azure_service(self, sub, region, key, n=1, *, app="data", scale=None):
+        spec = cat.AZURE_OTHER[key]
+        for i in range(n):
+            name = f"{app}-{i + 1:02d}"
+            self.resources.append(
+                Resource(
+                    provider="azure",
+                    account=sub,
+                    region=region,
+                    service_name=spec.service,
+                    service_category="Databases"
+                    if "App Service" not in spec.service
+                    else "Compute",
+                    resource_id=f"/subscriptions/{sub.id}/resourceGroups/rg-{app}/providers/"
+                    f"{spec.service.replace(' ', '')}/{name}",
+                    resource_name=name,
+                    od_hourly=spec.od,
+                    units=spec.units,
+                    schedule=always,
+                    instance_type=spec.sku,
+                    usage_unit=spec.usage_unit,
+                    quantity=spec.units if spec.usage_unit != "1 Hour" else 1,
+                    sp_eligible=spec.sp_eligible,
+                    scale=scale,
+                    tags={"app": app, "env": "prod"},
+                )
+            )
+
     # ---- commitments
-    def _record(self, provider, kind, start, term, payment, *, owner=None, **kw):
+    def _record(self, kind, start, term, payment, *, owner=None, **kw):
         return CommitmentRecord(
             kind=kind,
             provider_commitment_id=kw.pop("cid"),
@@ -330,84 +430,111 @@ class Builder:
     def _split(total_hourly: float, term: int, payment: str) -> tuple[Decimal, Decimal]:
         """(upfront total, recurring hourly) for an amortized hourly cost."""
         hours = term * 730
-        share = {"all_upfront": 1.0, "partial_upfront": 0.5}.get(payment, 0.0)
+        share = cat.UPFRONT_SHARE.get(payment, 0.0)
         upfront = Decimal(str(round(total_hourly * hours * share, 2)))
         recurring = Decimal(str(round(total_hourly * (1 - share), 6)))
         return upfront, recurring
 
-    def aws_ri(
+    def _ends_in(self, start: datetime | None, ends_in_days: int | None, term: int) -> datetime:
+        """Commitment start so it expires `ends_in_days` after the window end."""
+        if ends_in_days is None:
+            return start
+        return self.t1 + timedelta(days=ends_in_days) - timedelta(days=round(term / 12 * 365))
+
+    def reservation(
         self,
+        provider,
         owner,
+        service,
         region,
-        itype,
+        sku,
         count,
         term,
         payment,
-        start,
+        start=None,
         *,
+        ends_in_days=None,
         os="Linux",
         engine=None,
         deployment=None,
-        size_flexible=True,
+        flexible=True,
+        offering_class="standard",
     ):
-        """Regional Linux EC2 RIs are size-flexible within the family; others match exactly."""
-        is_rds = itype.startswith("db.")
-        if is_rds:
-            od = cat.AWS_RDS[(itype, engine, deployment)]
-            units_each = cat.aws_size_factor(itype) * (2 if deployment == "Multi-AZ" else 1)
-            service = "Amazon Relational Database Service"
+        """A reservation. Size-flexible ones match the family (normalized units)."""
+        start = self._ends_in(start, ends_in_days, term)
+        if provider == "aws":
+            disc_kind = "ri"
+            if service == RDS:
+                od = cat.AWS_RDS[(sku, engine, deployment)]
+                units_each = cat.aws_size_factor(sku) * (2 if deployment == "Multi-AZ" else 1)
+                flexible = flexible and engine not in cat.AWS_RDS_EXACT_ENGINES
+            elif service == CACHE:
+                od, units_each = cat.AWS_CACHE[sku], cat.aws_size_factor(sku)
+            else:
+                vcpu, od = cat.AWS_EC2[sku]
+                units_each = cat.aws_size_factor(sku)
+                flexible = flexible and os == "Linux"
+            kind = k.AWS_RI
         else:
-            vcpu, od = cat.AWS_EC2[itype]
-            if os == "Windows":
-                od += cat.AWS_WINDOWS_PER_VCPU * vcpu
-            units_each = cat.aws_size_factor(itype)
-            service = "Amazon Elastic Compute Cloud - Compute"
-        disc = cat.DISCOUNTS[("aws", "ri", term)]
+            kind = k.AZURE_RI
+            if service == VM:
+                vcpu, od = cat.AZURE_VM[sku]
+                units_each, disc_kind = vcpu / 2, "ri"
+            else:
+                spec = next(s for s in cat.AZURE_OTHER.values() if s.sku == sku)
+                od, units_each, disc_kind = spec.od, spec.units, spec.ri_kind
+                flexible = flexible and spec.service != "Azure App Service"
+        disc = cat.discount(provider, disc_kind, term, payment)
         amortized = od * (1 - disc) * count
         upfront, recurring = self._split(amortized, term, payment)
-        family = instance_family(itype)
-        flexible = size_flexible and not is_rds and os == "Linux"
-        cid = self._rid("ri-")
+        family = instance_family(sku)
+        if provider == "aws":
+            cid = self._rid("ri-")
+        else:
+            order = uuid.uuid5(NAMESPACE, self._rid("order"))
+            cid = (
+                f"/providers/microsoft.capacity/reservationorders/{order}/reservations/"
+                f"{uuid.uuid5(NAMESPACE, str(order))}"
+            )
 
         def matches(r: Resource) -> bool:
-            if r.provider != "aws" or r.region != region or r.spot or r.service_name != service:
+            if r.provider != provider or r.region != region or r.spot or r.service_name != service:
                 return False
-            if is_rds:
-                return (r.instance_type, r.database_engine, r.deployment_option) == (
-                    itype,
-                    engine,
-                    deployment,
-                )
-            if r.operating_system != os:
+            if service == RDS and (r.database_engine, r.deployment_option) != (engine, deployment):
                 return False
-            return r.family == family if flexible else r.instance_type == itype
+            if service in (EC2, VM) and r.operating_system != os:
+                return False
+            return r.family == family if flexible else r.instance_type == sku
 
+        attrs = {
+            "platform": engine or os,
+            "deployment_option": deployment,
+            "size_flexible": flexible,
+            "offering_class": offering_class,
+        }
+        if provider == "azure":
+            attrs["orderId"] = cid.split("/reservations/")[0]
         record = self._record(
-            "aws",
-            k.AWS_RI,
+            kind,
             start,
             term,
             payment,
             owner=owner.id,
             cid=cid,
-            scope="Region",
+            scope="Region" if provider == "aws" else "Shared",
             service=service,
             region=region,
-            instance_type=itype,
+            instance_type=sku,
             instance_family=family,
             quantity=count,
             upfront_cost=upfront,
             recurring_hourly_cost=recurring,
-            attributes={
-                "platform": engine or os,
-                "deployment_option": deployment,
-                "size_flexible": flexible,
-            },
+            attributes=attrs,
         )
         self.commitments.append(
             SynthCommitment(
                 record,
-                "aws",
+                provider,
                 CommitmentType.RESERVATION,
                 amortized,
                 matches,
@@ -415,12 +542,25 @@ class Builder:
             )
         )
 
-    def aws_sp(self, owner, kind, hourly, term, payment, start, *, region=None, family=None):
+    def aws_sp(
+        self,
+        owner,
+        kind,
+        hourly,
+        term,
+        payment,
+        start=None,
+        *,
+        ends_in_days=None,
+        region=None,
+        family=None,
+    ):
+        start = self._ends_in(start, ends_in_days, term)
         cid = (
             f"arn:aws:savingsplans::{owner.id}:savingsplan/{uuid.uuid5(NAMESPACE, self._rid('sp'))}"
         )
         if kind == k.AWS_SP_EC2:
-            disc = cat.DISCOUNTS[("aws", "ec2_sp", term)]
+            disc = cat.discount("aws", "ec2_sp", term, payment)
 
             def matches(r: Resource) -> bool:
                 return (
@@ -428,20 +568,19 @@ class Builder:
                     and not r.spot
                     and r.region == region
                     and r.family == family
-                    and r.service_name == "Amazon Elastic Compute Cloud - Compute"
+                    and r.service_name == EC2
                 )
 
             priority = 0
         else:
-            disc = cat.DISCOUNTS[("aws", "compute_sp", term)]
+            disc = cat.discount("aws", "compute_sp", term, payment)
 
             def matches(r: Resource) -> bool:
                 return r.provider == "aws" and not r.spot and r.sp_eligible
 
-            priority = 1
+            priority = 1 if term == 36 else 2
         upfront, recurring = self._split(hourly, term, payment)
         record = self._record(
-            "aws",
             kind,
             start,
             term,
@@ -468,65 +607,14 @@ class Builder:
             )
         )
 
-    def azure_ri(self, billing_sub, region, size, count, term, payment, start):
-        vcpu, od = cat.AZURE_VM[size]
-        disc = cat.DISCOUNTS[("azure", "ri", term)]
-        amortized = od * (1 - disc) * count
-        upfront, recurring = self._split(amortized, term, payment)
-        family = instance_family(size)
-        order = uuid.uuid5(NAMESPACE, self._rid("order"))
-        cid = (
-            f"/providers/microsoft.capacity/reservationorders/{order}/reservations/"
-            f"{uuid.uuid5(NAMESPACE, str(order))}"
-        )
-
-        def matches(r: Resource) -> bool:
-            # Instance size flexibility within the series; covers the Linux compute meter.
-            return (
-                r.provider == "azure"
-                and not r.spot
-                and r.region == region
-                and r.family == family
-                and r.operating_system == "Linux"
-            )
-
-        record = self._record(
-            "azure",
-            k.AZURE_RI,
-            start,
-            term,
-            payment,
-            owner=billing_sub.id,
-            cid=cid,
-            scope="Shared",
-            service="VirtualMachines",
-            region=region,
-            instance_type=size,
-            instance_family=family,
-            quantity=count,
-            upfront_cost=upfront,
-            recurring_hourly_cost=recurring,
-            attributes={"orderId": str(order)},
-        )
-        self.commitments.append(
-            SynthCommitment(
-                record,
-                "azure",
-                CommitmentType.RESERVATION,
-                amortized,
-                matches,
-                capacity_units=vcpu / 2 * count,
-            )
-        )
-
-    def azure_sp(self, billing_sub, hourly, term, start):
+    def azure_sp(self, billing_sub, hourly, term, start=None, *, ends_in_days=None):
+        start = self._ends_in(start, ends_in_days, term)
         order = uuid.uuid5(NAMESPACE, self._rid("sporder"))
         cid = (
             f"/providers/microsoft.billingbenefits/savingsplanorders/{order}/savingsplans/"
             f"{uuid.uuid5(NAMESPACE, str(order))}"
         )
         record = self._record(
-            "azure",
             k.AZURE_SP_COMPUTE,
             start,
             term,
@@ -538,7 +626,7 @@ class Builder:
             hourly_commitment=Decimal(str(hourly)),
             upfront_cost=Decimal(0),
             recurring_hourly_cost=Decimal(str(hourly)),
-            attributes={"orderId": str(order)},
+            attributes={"orderId": cid.split("/savingsplans/")[0]},
         )
         self.commitments.append(
             SynthCommitment(
@@ -547,7 +635,7 @@ class Builder:
                 CommitmentType.SAVINGS_PLAN,
                 hourly,
                 lambda r: r.provider == "azure" and not r.spot and r.sp_eligible,
-                discount=cat.DISCOUNTS[("azure", "sp", term)],
+                discount=cat.discount("azure", "sp", term),
             )
         )
 
@@ -575,7 +663,7 @@ class Builder:
                     region=r.region,
                     service_category=r.service_category,
                     service_name=r.service_name,
-                    sku_id=self._sku(r),
+                    sku_id=r.sku_key,
                     resource_id=r.resource_id,
                     resource_name=r.resource_name,
                     instance_family=r.family,
@@ -599,48 +687,66 @@ class Builder:
         hour = self.t0
         while hour < self.t1:
             end = hour + timedelta(hours=1)
-            # remaining fraction of each active resource-hour not yet covered
-            active = [[r, 1.0] for r in self.resources if r.schedule(hour)]
+            # [resource, remaining fraction, scale] for each running resource this hour
+            active = [
+                [r, 1.0, r.scale(hour) if r.scale else 1.0]
+                for r in self.resources
+                if r.schedule(hour)
+            ]
             for c in ris:
                 if not c.active(hour):
                     continue
                 rate = c.amortized_hourly / c.capacity_units
                 cap = c.capacity_units
                 for item in active:
-                    r, frac = item
+                    r, frac, mult = item
                     if cap <= EPS or frac <= EPS or not c.matches(r):
                         continue
-                    take_units = min(cap, r.units * frac)
-                    f = take_units / r.units
-                    self._covered(emit, r, c, hour, end, f, take_units * rate)
+                    take_units = min(cap, r.units * mult * frac)
+                    f = take_units / (r.units * mult)
+                    self._covered(emit, r, c, hour, end, f, mult, take_units * rate)
                     item[1] -= f
                     cap -= take_units
-                used = c.amortized_hourly - cap * rate
                 self._close_hour(
-                    emit, c, hour, end, cap * rate, used, daily_used, daily_total, daily_unused
+                    emit,
+                    c,
+                    hour,
+                    end,
+                    cap * rate,
+                    c.amortized_hourly - cap * rate,
+                    daily_used,
+                    daily_total,
+                    daily_unused,
                 )
             for c in sps:
                 if not c.active(hour):
                     continue
                 commit = c.amortized_hourly
                 for item in active:
-                    r, frac = item
+                    r, frac, mult = item
                     if commit <= EPS or frac <= EPS or not c.matches(r):
                         continue
-                    need = r.od_hourly * frac * (1 - c.discount)
+                    need = r.od_hourly * mult * frac * (1 - c.discount)
                     take = min(commit, need)
                     f = frac * take / need
-                    self._covered(emit, r, c, hour, end, f, take)
+                    self._covered(emit, r, c, hour, end, f, mult, take)
                     item[1] -= f
                     commit -= take
-                used = c.amortized_hourly - commit
                 self._close_hour(
-                    emit, c, hour, end, commit, used, daily_used, daily_total, daily_unused
+                    emit,
+                    c,
+                    hour,
+                    end,
+                    commit,
+                    c.amortized_hourly - commit,
+                    daily_used,
+                    daily_total,
+                    daily_unused,
                 )
-            for r, frac in active:
+            for r, frac, mult in active:
                 if frac <= EPS:
                     continue
-                od = r.od_hourly * frac
+                od = r.od_hourly * mult * frac
                 cost = od * (1 - cat.SPOT_DISCOUNT) if r.spot else od
                 emit(
                     r,
@@ -649,8 +755,8 @@ class Builder:
                     pricing_category=(
                         PricingCategory.SPOT if r.spot else PricingCategory.ON_DEMAND
                     ).value,
-                    usage_quantity=r.quantity * frac,
-                    normalized_units=r.units * frac,
+                    usage_quantity=r.quantity * mult * frac,
+                    normalized_units=r.units * mult * frac,
                     list_cost=od,
                     billed_cost=cost,
                     effective_cost=cost,
@@ -684,20 +790,12 @@ class Builder:
             utilization=utilization,
             usage=usage,
             prices=self._prices(),
+            native_recommendations=self._native(usage),
         )
 
-    def _sku(self, r: Resource) -> str | None:
-        if r.provider == "azure" and r.instance_type:
-            return azure_key(r.service_name, r.instance_type, r.operating_system)
-        if r.database_engine:
-            return aws_rds_key(r.instance_type, r.database_engine, r.deployment_option)
-        if r.instance_type:
-            return aws_ec2_key(r.instance_type, r.operating_system or "Linux", r.tenancy)
-        return f"{r.service_name}|{r.usage_unit}"
-
     @staticmethod
-    def _covered(emit, r, c: SynthCommitment, start, end, frac, effective) -> None:
-        od = r.od_hourly * frac
+    def _covered(emit, r, c: SynthCommitment, start, end, frac, mult, effective) -> None:
+        od = r.od_hourly * mult * frac
         emit(
             r,
             start,
@@ -706,8 +804,8 @@ class Builder:
             commitment_id=c.record.provider_commitment_id,
             commitment_type=c.ctype.value,
             commitment_status=CommitmentStatus.USED.value,
-            usage_quantity=r.quantity * frac,
-            normalized_units=r.units * frac,
+            usage_quantity=r.quantity * mult * frac,
+            normalized_units=r.units * mult * frac,
             list_cost=od,
             billed_cost=0.0,
             effective_cost=effective,
@@ -789,7 +887,9 @@ class Builder:
             ],
         }
         for conn in self.connections:
-            scale = len([r for r in self.resources if r.provider == conn.provider]) / 10 or 0.2
+            res = [r for r in self.resources if r.provider == conn.provider]
+            scale = len(res) / 10 or 0.2
+            regions = sorted({r.region for r in res}) or ["global"]
             for acct in conn.accounts:
                 for name, category, base in services[conn.provider]:
                     cost = base * scale / len(conn.accounts) * (0.9 + 0.2 * self.rng.random())
@@ -801,12 +901,7 @@ class Builder:
                         billing_account_id=conn.payer_account_id,
                         sub_account_id=acct.id,
                         sub_account_name=acct.name,
-                        region=self.rng.choice(
-                            sorted(
-                                {r.region for r in self.resources if r.provider == conn.provider}
-                            )
-                            or ["global"]
-                        ),
+                        region=self.rng.choice(regions),
                         service_name=name,
                         service_category=category,
                         pricing_category=PricingCategory.ON_DEMAND.value,
@@ -818,107 +913,198 @@ class Builder:
                         on_demand_equiv_cost=cost,
                     )
 
+    # ---- prices
     def _prices(self) -> list[PriceRecord]:
+        """Every price the profile's resources need: on-demand, RI and SP for each term and
+        payment option (AWS), or term (Azure)."""
         out: list[PriceRecord] = []
-        regions = defaultdict(set)
-        for r in self.resources:
-            regions[r.provider].add(r.region)
-        today = self.start
-        for region in sorted(regions["aws"]):
-            for itype, (vcpu, od) in cat.AWS_EC2.items():
-                for os_name in ("Linux", "Windows"):
-                    price = od + (cat.AWS_WINDOWS_PER_VCPU * vcpu if os_name == "Windows" else 0)
-                    key = aws_ec2_key(itype, os_name, "Shared")
-                    out.append(
-                        PriceRecord(
-                            "aws",
-                            "ec2",
-                            key,
-                            region,
-                            "on_demand",
-                            "Hrs",
-                            Decimal(str(round(price, 6))),
-                            today,
-                        )
-                    )
-                    for term in (12, 36):
-                        for model, dk in (("ri", "ri"), ("sp", "compute_sp")):
-                            rate = price * (1 - cat.DISCOUNTS[("aws", dk, term)])
-                            out.append(
-                                PriceRecord(
-                                    "aws",
-                                    "ec2",
-                                    key,
-                                    region,
-                                    model,
-                                    "Hrs",
-                                    Decimal(str(round(rate, 6))),
-                                    today,
-                                    term_months=term,
-                                    payment_option="no_upfront",
-                                )
-                            )
-            for (klass, engine, dep), od in cat.AWS_RDS.items():
-                key = aws_rds_key(klass, engine, dep)
-                out.append(
-                    PriceRecord(
-                        "aws", "rds", key, region, "on_demand", "Hrs", Decimal(str(od)), today
-                    )
+        seen: set[tuple[str, str]] = set()
+
+        def add(
+            provider, service, key, region, model, od, disc, term=None, payment=None, unit="Hrs"
+        ):
+            price = od if model == "on_demand" else od * (1 - disc)
+            attrs = {}
+            if payment in cat.UPFRONT_SHARE and term:
+                share = cat.UPFRONT_SHARE[payment]
+                attrs = {
+                    "upfront": str(round(price * term * 730 * share, 4)),
+                    "hourly": str(round(price * (1 - share), 8)),
+                }
+            out.append(
+                PriceRecord(
+                    provider,
+                    service,
+                    key,
+                    region,
+                    model,
+                    unit,
+                    Decimal(str(round(price, 8))),
+                    self.start,
+                    term_months=term,
+                    payment_option=payment,
+                    attributes=attrs,
                 )
+            )
+
+        aws_payments = ("no_upfront", "partial_upfront", "all_upfront")
+        for r in self.resources:
+            key = r.sku_key
+            if key is None or (key, r.region) in seen:
+                continue
+            seen.add((key, r.region))
+            od = r.od_hourly
+            if r.provider == "aws":
+                service = key.split("|", 1)[0]
+                add("aws", service, key, r.region, "on_demand", od, 0)
                 for term in (12, 36):
-                    rate = od * (1 - cat.DISCOUNTS[("aws", "ri", term)])
-                    out.append(
-                        PriceRecord(
-                            "aws",
-                            "rds",
-                            key,
-                            region,
-                            "ri",
-                            "Hrs",
-                            Decimal(str(round(rate, 6))),
-                            today,
-                            term_months=term,
-                            payment_option="no_upfront",
-                        )
-                    )
-        for region in sorted(regions["azure"]):
-            for size, (vcpu, od) in cat.AZURE_VM.items():
-                for os_name, product in (
-                    ("Linux", "Virtual Machines Dsv3 Series"),
-                    ("Windows", "Virtual Machines Dsv3 Series Windows"),
-                ):
-                    price = od + (cat.AZURE_WINDOWS_PER_VCPU * vcpu if os_name == "Windows" else 0)
-                    key = azure_key("Virtual Machines", size, product)
-                    out.append(
-                        PriceRecord(
-                            "azure",
-                            "Virtual Machines",
-                            key,
-                            region,
-                            "on_demand",
-                            "1 Hour",
-                            Decimal(str(round(price, 6))),
-                            today,
-                        )
-                    )
-                    for term in (12, 36):
-                        for model in ("ri", "sp"):
-                            if model == "ri" and os_name == "Windows":
-                                continue
-                            rate = price * (1 - cat.DISCOUNTS[("azure", model, term)])
-                            out.append(
-                                PriceRecord(
-                                    "azure",
-                                    "Virtual Machines",
-                                    key,
-                                    region,
-                                    model,
-                                    "1 Hour",
-                                    Decimal(str(round(rate, 6))),
-                                    today,
-                                    term_months=term,
-                                )
+                    for pay in aws_payments:
+                        if service == "fargate":
+                            add(
+                                "aws",
+                                service,
+                                key,
+                                r.region,
+                                "sp",
+                                od,
+                                cat.discount("aws", "fargate_sp", term, pay),
+                                term,
+                                pay,
                             )
+                            continue
+                        if service == "ec2":
+                            add(
+                                "aws",
+                                service,
+                                key,
+                                r.region,
+                                "sp",
+                                od,
+                                cat.discount("aws", "compute_sp", term, pay),
+                                term,
+                                pay,
+                            )
+                            add(
+                                "aws",
+                                service,
+                                key,
+                                r.region,
+                                "sp_instance",
+                                od,
+                                cat.discount("aws", "ec2_sp", term, pay),
+                                term,
+                                pay,
+                            )
+                            if r.operating_system != "Linux":
+                                continue  # Windows EC2 is SP-only in this data set
+                        add(
+                            "aws",
+                            service,
+                            key,
+                            r.region,
+                            "ri",
+                            od,
+                            cat.discount("aws", "ri", term, pay),
+                            term,
+                            pay,
+                        )
+            else:
+                unit = r.usage_unit
+                per_unit = od / (r.quantity or 1) if unit != "1 Hour" else od
+                add("azure", r.service_name, key, r.region, "on_demand", per_unit, 0, unit=unit)
+                if r.service_name == VM:
+                    ri_kind, sp_ok = "ri", True
+                    ri_ok = r.operating_system == "Linux"
+                else:
+                    spec = next(s for s in cat.AZURE_OTHER.values() if s.sku == r.instance_type)
+                    ri_kind, sp_ok, ri_ok = spec.ri_kind, spec.sp_eligible, True
+                for term in (12, 36):
+                    if ri_ok:
+                        add(
+                            "azure",
+                            r.service_name,
+                            key,
+                            r.region,
+                            "ri",
+                            per_unit,
+                            cat.discount("azure", ri_kind, term),
+                            term,
+                            unit=unit,
+                        )
+                    if sp_ok:
+                        add(
+                            "azure",
+                            r.service_name,
+                            key,
+                            r.region,
+                            "sp",
+                            per_unit,
+                            cat.discount("azure", "sp", term),
+                            term,
+                            unit=unit,
+                        )
+        return out
+
+    # ---- native recommendations
+    def _native(self, usage: pa.Table) -> list[NativeRecommendation]:
+        """What the providers' own tools would say: 30-day averages of on-demand usage,
+        with no view of seasonality, migrations or how RIs and SPs interact."""
+        import duckdb
+
+        con = duckdb.connect()
+        con.execute("SET TimeZone = 'UTC'")
+        con.register("u", usage)
+        since = self.t1 - timedelta(days=30)
+        hours = 30 * 24
+        out: list[NativeRecommendation] = []
+        sp_rows = con.execute(
+            """SELECT provider, sum(on_demand_equiv_cost) FROM u
+               WHERE pricing_category = 'On-Demand' AND charge_category = 'Usage'
+                 AND service_name IN (?, ?, ?, ?) AND charge_period_start >= ?
+               GROUP BY 1""",
+            [EC2, FARGATE, VM, "Azure App Service", since],
+        ).fetchall()
+        for provider, od in sp_rows:
+            disc = cat.discount(provider, "compute_sp" if provider == "aws" else "sp", 12)
+            hourly = od / hours * (1 - disc)
+            out.append(
+                NativeRecommendation(
+                    provider=provider,
+                    kind=k.AWS_SP_COMPUTE if provider == "aws" else k.AZURE_SP_COMPUTE,
+                    term_months=12,
+                    payment_option="no_upfront" if provider == "aws" else None,
+                    lookback_days=30,
+                    hourly_commitment=Decimal(str(round(hourly, 3))),
+                    estimated_monthly_savings=Decimal(str(round(od / 30 * 30.4 * disc * 0.9, 2))),
+                    scope="organization" if provider == "aws" else "Shared",
+                )
+            )
+        ri_rows = con.execute(
+            """SELECT provider, service_name, region, instance_type,
+                      sum(usage_quantity) / ? AS avg_qty, sum(on_demand_equiv_cost) AS od
+               FROM u WHERE pricing_category = 'On-Demand' AND charge_category = 'Usage'
+                 AND service_name IN (?, ?, ?) AND charge_period_start >= ?
+               GROUP BY ALL HAVING avg_qty >= 1""",
+            [hours, RDS, CACHE, VM, since],
+        ).fetchall()
+        for provider, service, region, itype, qty, od in ri_rows:
+            disc = cat.discount(provider, "ri", 12)
+            out.append(
+                NativeRecommendation(
+                    provider=provider,
+                    kind=k.AWS_RI if provider == "aws" else k.AZURE_RI,
+                    term_months=12,
+                    payment_option="no_upfront" if provider == "aws" else None,
+                    lookback_days=30,
+                    region=region,
+                    instance_type=itype,
+                    instance_family=instance_family(itype),
+                    quantity=Decimal(int(qty)),
+                    estimated_monthly_savings=Decimal(str(round(od / 30 * 30.4 * disc * 0.9, 2))),
+                    scope="Shared",
+                    raw={"service": service},
+                )
+            )
         return out
 
 
@@ -938,16 +1124,22 @@ def _azure_subs(b: Builder, names: list[str]) -> list[Account]:
 
 
 def _small(b: Builder) -> None:
+    """AWS only. An expiring Compute SP (urgent), flat unreserved RDS Postgres Multi-AZ and
+    ElastiCache, business-hours batch."""
     (payer,) = accts = _aws_accounts(b, ["small-prod"])
     b.connections.append(SyntheticConnection("aws", "AWS", accts, payer_account_id=payer.id))
     b.ec2(payer, "us-east-1", "m5.large", 6, app="web")
     b.ec2(payer, "us-east-1", "c5.xlarge", 2, schedule=business_hours, app="batch")
     b.ec2(payer, "us-east-1", "t3.medium", 2, app="tools", env="dev")
     b.rds(payer, "us-east-1", "db.m5.large", "MySQL")
-    b.aws_sp(payer, k.AWS_SP_COMPUTE, 0.30, 12, "no_upfront", b.at(-200))
+    b.rds(payer, "us-east-1", "db.r6g.xlarge", "PostgreSQL", "Multi-AZ", app="pg")
+    b.cache(payer, "us-east-1", "cache.r6g.large", 3, app="sessions")
+    b.aws_sp(payer, k.AWS_SP_COMPUTE, 0.30, 12, "no_upfront", ends_in_days=10)
 
 
 def _medium(b: Builder) -> None:
+    """Azure EA. 20 VMs vs 15 reserved, a ramping workload, a stranded D4s_v4 RI after a move
+    to D4as_v5, Cosmos with peaks, flat SQL vCores, App Service and Postgres."""
     subs = _azure_subs(b, ["prod", "staging", "shared-services"])
     enrollment = "84251234"
     b.connections.append(
@@ -961,63 +1153,122 @@ def _medium(b: Builder) -> None:
         )
     )
     prod, staging, shared = subs
-    b.vm(prod, "eastus", "Standard_D4s_v3", 8, app="api")
-    b.vm(prod, "eastus", "Standard_E4s_v3", 4, app="cache")
-    b.vm(prod, "westeurope", "Standard_D2s_v3", 4, app="eu-api")
+    b.vm(prod, "eastus", "Standard_D4s_v5", 20, app="api")
+    b.reservation("azure", prod, VM, "eastus", "Standard_D4s_v5", 15, 36, "all_upfront", b.at(-400))
+    # Ramping 5 -> 20 over the last 60 days.
+    ramp_start = b.before_end(60)
+    b.vm(
+        prod,
+        "westeurope",
+        "Standard_E4s_v5",
+        20,
+        app="ingest",
+        stagger=lambda i: None if i < 5 else ramp_start + timedelta(days=4 * (i - 5)),
+    )
+    # Migration: D4s_v4 retired on day 60, replaced by D4as_v5; the v4 RI is stranded.
+    switch = b.at(60)
+    b.vm(prod, "eastus2", "Standard_D4s_v4", 10, app="svc", end=switch)
+    b.vm(prod, "eastus2", "Standard_D4as_v5", 10, app="svc", start=switch)
+    b.reservation("azure", prod, VM, "eastus2", "Standard_D4s_v4", 10, 12, "monthly", b.at(-30))
+
+    def cosmos_load(h: datetime) -> float:
+        # 10k RU/s floor, up to 40k RU/s in weekday business hours.
+        peak = h.weekday() < 5 and 9 <= h.hour < 18
+        return 1.0 + (3.0 * math.sin((h.hour - 9) / 9 * math.pi) if peak else 0.0)
+
+    b.azure_service(
+        shared, "eastus", "cosmos", 1, app="catalog-db", scale=lambda h: 100 * cosmos_load(h)
+    )
+    b.azure_service(prod, "eastus", "sql_gp", 16, app="sql-gp")
+    b.azure_service(prod, "eastus", "sql_bc", 8, app="sql-bc")
+    b.azure_service(prod, "eastus", "app_p1v3", 4, app="web-app")
+    b.azure_service(prod, "eastus", "pg_d4ds", 2, app="pg")
     b.vm(prod, "eastus", "Standard_D4s_v3", 3, os="Windows", app="erp")
     b.vm(staging, "eastus", "Standard_D2s_v3", 4, schedule=business_hours, app="api", env="stg")
     b.vm(shared, "eastus", "Standard_B2s", 3, app="jump")
-    b.azure_ri(prod, "eastus", "Standard_D4s_v3", 6, 36, "all_upfront", b.at(-400))
-    b.azure_ri(prod, "eastus", "Standard_E4s_v3", 2, 12, "monthly", b.at(-120))
-    b.azure_sp(prod, 0.35, 12, b.at(-60))
 
 
 def _large(b: Builder) -> None:
+    """AWS org + Azure MCA with layered SPs and RIs, a 50x m5 RI stranded by a move to m7i,
+    a growing workload, staging, nightly batch, Spot, a brand-new workload, Windows, SQL Server
+    RDS, an ElastiCache cluster with 6 nodes and 4 expiring reserved nodes."""
     accts = _aws_accounts(b, ["payer", "prod", "data", "staging", "legacy"])
     payer, prod, data, staging, legacy = accts
     b.connections.append(SyntheticConnection("aws", "AWS org", accts, payer_account_id=payer.id))
-    # Steady prod web fleet, covered by layered RIs and an EC2 Instance SP.
-    b.ec2(prod, "us-east-1", "m5.xlarge", 20, app="web")
-    b.ec2(prod, "us-east-1", "m5.2xlarge", 6, app="api")
-    b.ec2(prod, "us-west-2", "m5.large", 8, app="web-west")
-    b.ec2(prod, "us-east-1", "m5.xlarge", 4, os="Windows", app="win-iis")
-    b.ec2(data, "us-east-1", "r5.xlarge", 10, app="analytics")
-    b.ec2(staging, "us-east-1", "m5.large", 8, schedule=business_hours, app="web", env="stg")
-    # Spot batch fleet with a diurnal shape.
+    use1, usw2 = "us-east-1", "us-west-2"
+    # Steady prod fleets, partly covered by an m6i RI and an EC2 Instance SP.
+    b.ec2(prod, use1, "m6i.xlarge", 20, app="web")
+    b.ec2(prod, use1, "m6i.2xlarge", 6, app="api")
+    b.ec2(prod, usw2, "m6i.large", 8, app="web-west")
+    b.ec2(prod, use1, "m6i.xlarge", 4, os="Windows", app="win-iis")
+    b.ec2(data, use1, "r5.xlarge", 10, app="analytics")
+    b.reservation("aws", prod, EC2, use1, "m6i.xlarge", 12, 36, "all_upfront", b.at(-500))
+    b.aws_sp(payer, k.AWS_SP_EC2, 1.2, 36, "no_upfront", b.at(-300), region=use1, family="m6i")
+    # Growing workload: floor 40 -> 48 -> 56 normalized units, plus daytime autoscaling.
+    b.ec2(
+        prod,
+        use1,
+        "c6i.xlarge",
+        7,
+        app="search",
+        stagger=lambda i: {5: b.at(120), 6: b.at(150)}.get(i),
+    )
+    b.ec2(
+        prod,
+        use1,
+        "c6i.xlarge",
+        3,
+        app="search-burst",
+        sched_factory=lambda i: autoscale(i, 3, 0.0, 1.0),
+    )
+    # Things that must not drive commitments.
+    b.ec2(staging, use1, "t3.large", 8, schedule=business_hours, app="web", env="stg")
+    b.ec2(data, use1, "c7i.2xlarge", 10, schedule=nightly(1, 5), app="etl")
     b.ec2(
         data,
-        "us-east-1",
+        use1,
         "c5.2xlarge",
         16,
         spot=True,
         app="spark",
         sched_factory=lambda i: autoscale(i, 16, 0.2, 1.0),
     )
-    # On-demand autoscaling (Compute SP candidates).
+    b.ec2(prod, use1, "m7g.large", 6, app="new-svc", start=b.before_end(7))
+    # Compute SP candidates.
     b.ec2(
         prod,
-        "us-east-1",
+        use1,
         "c5.xlarge",
         12,
         app="workers",
         sched_factory=lambda i: autoscale(i, 12, 0.35, 1.0),
     )
-    b.fargate(prod, "us-east-1", 32, app="jobs")
-    # Migration: legacy m4 fleet replaced by m6i on day 30, stranding its RIs.
-    migrate = b.at(30)
-    b.ec2(legacy, "us-east-1", "m4.xlarge", 6, schedule=window(None, migrate), app="legacy")
-    b.ec2(legacy, "us-east-1", "m6i.xlarge", 6, schedule=window(migrate, None), app="legacy")
-    # Databases, including SQL Server.
-    b.rds(data, "us-east-1", "db.r5.xlarge", "SQL Server SE", "Multi-AZ", n=2, app="mssql")
-    b.rds(data, "us-east-1", "db.r5.xlarge", "PostgreSQL", "Multi-AZ", n=2, app="pg")
-    b.rds(staging, "us-east-1", "db.r5.large", "PostgreSQL", n=1, app="pg-stg")
-
-    b.aws_ri(prod, "us-east-1", "m5.xlarge", 12, 36, "all_upfront", b.at(-500))
-    b.aws_ri(prod, "us-east-1", "m5.large", 8, 12, "partial_upfront", b.at(-90))
-    b.aws_ri(legacy, "us-east-1", "m4.xlarge", 6, 36, "no_upfront", b.at(-700))
-    b.aws_ri(
+    b.fargate(prod, use1, 32, app="jobs")
+    b.aws_sp(payer, k.AWS_SP_COMPUTE, 1.5, 12, "no_upfront", ends_in_days=65)
+    b.aws_sp(payer, k.AWS_SP_COMPUTE, 0.8, 12, "all_upfront", b.at(150, 10))
+    # Migration: 50x m5.xlarge retired on day 120, replaced by m7i.xlarge.
+    switch = b.at(120)
+    b.ec2(legacy, use1, "m5.xlarge", 50, app="legacy", end=switch)
+    b.ec2(legacy, use1, "m7i.xlarge", 50, app="legacy", start=switch)
+    b.reservation(
+        "aws",
+        legacy,
+        EC2,
+        use1,
+        "m5.xlarge",
+        50,
+        36,
+        "no_upfront",
+        b.at(-700),
+        offering_class="convertible",
+    )
+    # Databases: SQL Server needs exact-type RIs; Postgres Multi-AZ unreserved.
+    b.rds(data, use1, "db.r5.xlarge", "SQL Server SE", "Multi-AZ", n=3, app="mssql")
+    b.reservation(
+        "aws",
         data,
-        "us-east-1",
+        RDS,
+        use1,
         "db.r5.xlarge",
         2,
         12,
@@ -1026,12 +1277,10 @@ def _large(b: Builder) -> None:
         engine="SQL Server SE",
         deployment="Multi-AZ",
     )
-    b.aws_sp(
-        payer, k.AWS_SP_EC2, 2.0, 36, "no_upfront", b.at(-300), region="us-east-1", family="m5"
-    )
-    b.aws_sp(payer, k.AWS_SP_COMPUTE, 1.5, 12, "no_upfront", b.at(-200))
-    # Bought during the window: an upfront Purchase row shows up on day 45.
-    b.aws_sp(payer, k.AWS_SP_COMPUTE, 0.8, 12, "all_upfront", b.at(45, 10))
+    b.rds(data, use1, "db.r5.xlarge", "PostgreSQL", "Multi-AZ", n=2, app="pg")
+    # ElastiCache: 6 nodes, 4 reserved, reservation expiring in 40 days.
+    b.cache(prod, use1, "cache.r6g.large", 6, app="redis")
+    b.reservation("aws", prod, CACHE, use1, "cache.r6g.large", 4, 12, "no_upfront", ends_in_days=40)
 
     subs = _azure_subs(b, ["corp-prod", "corp-dev", "data-platform", "sap"])
     acct, profile = "7d3c9a1e-0000-4c1b-8a5e-1a2b3c4d5e6f:abcd1234_2019-05-31", "PF12-ABCD-XY3-ZZZ"
@@ -1063,17 +1312,20 @@ def _large(b: Builder) -> None:
     )
     b.vm(sap, "westeurope", "Standard_E8s_v3", 4, app="sap")
     b.vm(cdev, "eastus2", "Standard_D2s_v3", 10, schedule=business_hours, app="dev", env="dev")
-    b.azure_ri(cprod, "eastus2", "Standard_D8s_v3", 8, 36, "all_upfront", b.at(-365))
-    b.azure_ri(sap, "westeurope", "Standard_E8s_v3", 4, 36, "monthly", b.at(-600))
+    b.reservation(
+        "azure", cprod, VM, "eastus2", "Standard_D8s_v3", 8, 36, "all_upfront", b.at(-365)
+    )
+    b.reservation("azure", sap, VM, "westeurope", "Standard_E8s_v3", 4, 36, "monthly", b.at(-600))
     b.azure_sp(cprod, 1.2, 12, b.at(-100))
 
 
 def _startup(b: Builder) -> None:
+    """21 days of history, no commitments."""
     (aws,) = accts = _aws_accounts(b, ["startup"])
     b.connections.append(SyntheticConnection("aws", "AWS", accts, payer_account_id=aws.id))
     b.ec2(aws, "us-east-1", "t3.medium", 3, app="api")
-    b.ec2(aws, "us-east-1", "m6i.large", 2, schedule=window(b.at(10), None), app="api")
-    b.rds(aws, "us-east-1", "db.r5.large", "PostgreSQL", app="pg")
+    b.ec2(aws, "us-east-1", "m6i.large", 2, start=b.at(10), app="api")
+    b.rds(aws, "us-east-1", "db.r6g.xlarge", "PostgreSQL", "Multi-AZ", app="pg")
     subs = _azure_subs(b, ["startup-payg"])
     b.connections.append(
         SyntheticConnection(
@@ -1086,16 +1338,17 @@ def _startup(b: Builder) -> None:
         )
     )
     b.vm(subs[0], "eastus", "Standard_B2s", 2, app="ml")
-    b.vm(subs[0], "eastus", "Standard_D4s_v5", 2, schedule=window(b.at(7), None), app="ml")
+    b.vm(subs[0], "eastus", "Standard_D4s_v5", 2, start=b.at(7), app="ml")
 
 
 # profile -> (builder, default days of history)
 PROFILES: dict[str, tuple[Callable[[Builder], None], int]] = {
     "small": (_small, 90),
-    "medium": (_medium, 90),
-    "large": (_large, 90),
+    "medium": (_medium, 120),
+    "large": (_large, 180),
     "startup": (_startup, 21),
 }
+DEFAULT_END = date(2026, 10, 1)
 
 
 def generate(
@@ -1104,7 +1357,7 @@ def generate(
     """Build one tenant whose history ends the day before `end` (default: 2026-10-01)."""
     fn, default_days = PROFILES[profile]
     days = days or default_days
-    end = end or date(2026, 10, 1)
+    end = end or DEFAULT_END
     b = Builder(profile, end - timedelta(days=days), days, seed)
     fn(b)
     return b.build()

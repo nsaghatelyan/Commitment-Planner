@@ -5,7 +5,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import CloudConnection, Tenant
-from app.services.collection import upsert_commitments, upsert_utilization
+from app.services.collection import (
+    save_native_recommendations,
+    upsert_commitments,
+    upsert_utilization,
+)
 from app.services.pricing import upsert_prices
 from app.synthetic.generator import SyntheticTenant
 from app.usage.storage import UsageStore
@@ -29,6 +33,9 @@ def seed(session: Session, tenant: SyntheticTenant, store: UsageStore) -> dict[s
     for provider in ("aws", "azure"):
         part = tenant.usage.filter(pc.equal(tenant.usage.column("provider"), provider))
         counts["usage_rows"] += sum(store.write(tenant.tenant_id, provider, part).values())
+        native = [n for n in tenant.native_recommendations if n.provider == provider]
+        if native:
+            save_native_recommendations(store, tenant.tenant_id, provider, tenant.end, native)
 
     for sc in tenant.connections:
         conn = session.scalars(

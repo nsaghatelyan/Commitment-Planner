@@ -35,6 +35,10 @@ class Tenant(IdMixin, TimestampMixin, Base):
 
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    # conservative | balanced | aggressive: how far commitments are sized above the floor.
+    risk_profile: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="balanced", server_default="balanced"
+    )
 
 
 class User(IdMixin, TimestampMixin, Base):
@@ -167,7 +171,7 @@ class Price(IdMixin, Base):
     # See app.pricing.keys for the per-provider conventions.
     sku_key: Mapped[str] = mapped_column(String(256), nullable=False)
     region: Mapped[str] = mapped_column(String(64), nullable=False)
-    # on_demand | sp | ri
+    # on_demand | sp (Compute SP, Azure SP) | sp_instance (AWS EC2 Instance SP) | ri
     pricing_model: Mapped[str] = mapped_column(String(16), nullable=False)
     term_months: Mapped[int | None]
     payment_option: Mapped[str | None] = mapped_column(String(32))
@@ -209,6 +213,10 @@ class AnalysisRun(IdMixin, TimestampMixin, Base):
     lookback_days: Mapped[int] = mapped_column(nullable=False, default=30)
     parameters: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     engine_version: Mapped[str | None] = mapped_column(String(32))
+    risk_profile: Mapped[str | None] = mapped_column(String(16))
+    # Per-client summary: spend, coverage, utilization, expiring/stranded commitments,
+    # ordered purchase plan, projected savings, comparison with native recommendations.
+    summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)
@@ -219,26 +227,45 @@ class Recommendation(IdMixin, TimestampMixin, Base):
 
     tenant_id: Mapped[uuid.UUID] = tenant_fk()
     analysis_run_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("analysis_run.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("analysis_run.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     cloud_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("cloud_account.id", ondelete="SET NULL")
     )
+    # native: the provider's own recommendation; engine: our simulation.
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    # purchase | renew | exchange | flag (an existing commitment that needs attention)
+    action: Mapped[str] = mapped_column(String(16), nullable=False, default="purchase")
+    # Order in the purchase plan (layering order); null for native rows.
+    plan_rank: Mapped[int | None]
     provider: Mapped[str] = mapped_column(String(16), nullable=False)
-    commitment_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    term_months: Mapped[int] = mapped_column(nullable=False)
-    payment_option: Mapped[str | None] = mapped_column(String(32))
+    # Same values as commitment.kind, e.g. aws_sp_compute, aws_ri, azure_ri.
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope: Mapped[str | None] = mapped_column(String(64))
+    service: Mapped[str | None] = mapped_column(String(128))
     region: Mapped[str | None] = mapped_column(String(64))
     instance_family: Mapped[str | None] = mapped_column(String(64))
+    instance_type: Mapped[str | None] = mapped_column(String(64))
+    term_months: Mapped[int] = mapped_column(nullable=False)
+    payment_option: Mapped[str | None] = mapped_column(String(32))
     hourly_commitment: Mapped[Decimal | None] = mapped_column(MONEY)
-    quantity: Mapped[int | None]
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
     upfront_cost: Mapped[Decimal | None] = mapped_column(MONEY)
-    estimated_monthly_savings: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
-    estimated_savings_pct: Mapped[Decimal | None] = mapped_column(Numeric(7, 4))
+    monthly_cost_after: Mapped[Decimal | None] = mapped_column(MONEY)
+    monthly_savings: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    savings_pct: Mapped[Decimal | None] = mapped_column(Numeric(7, 4))
     expected_utilization_pct: Mapped[Decimal | None] = mapped_column(Numeric(7, 4))
-    breakeven_months: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    breakeven_month: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    # low | med | high
+    risk: Mapped[str | None] = mapped_column(String(8))
+    urgent: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
+    rationale: Mapped[str | None] = mapped_column(Text)
     # open | accepted | dismissed
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    # Term/payment alternatives, stability stats, chart series, pool key, etc.
     details: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
 

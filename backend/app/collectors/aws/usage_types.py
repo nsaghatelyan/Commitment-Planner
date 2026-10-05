@@ -91,3 +91,16 @@ def deployment_option(usage_kind: str | None) -> str | None:
     if usage_kind.startswith("InstanceUsage"):
         return "Single-AZ"
     return None
+
+
+# Normalization factors per size (RI size flexibility and normalized units).
+SIZE_FACTORS = {
+    "nano": 0.25, "micro": 0.5, "small": 1, "medium": 2, "large": 4, "xlarge": 8,
+    "2xlarge": 16, "3xlarge": 24, "4xlarge": 32, "6xlarge": 48, "8xlarge": 64,
+    "9xlarge": 72, "10xlarge": 80, "12xlarge": 96, "16xlarge": 128, "18xlarge": 144,
+    "24xlarge": 192, "32xlarge": 256, "48xlarge": 384,
+}  # fmt: skip
+
+
+def aws_size_factor(instance_type: str) -> float:
+    return SIZE_FACTORS.get(instance_type.rsplit(".", 1)[-1], 1)

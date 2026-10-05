@@ -182,7 +182,8 @@ def savings_plan_rates(
                 service="ec2",
                 sku_key=aws_ec2_key(itype, os_name or "Linux", props.get("tenancy")),
                 region=props.get("region", ""),
-                pricing_model="sp",
+                # Compute SP rates are "sp"; EC2 Instance SP rates "sp_instance" (they differ).
+                pricing_model="sp_instance" if offering.get("planType") == "EC2Instance" else "sp",
                 unit=rate.get("unit", "Hrs"),
                 price_per_unit=Decimal(str(rate["rate"])),
                 term_months=months,
