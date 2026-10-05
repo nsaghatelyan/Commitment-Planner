@@ -62,6 +62,59 @@ Append `&theme=light` or `&theme=dark` to any URL to force a theme.
 ![Recommendation detail](docs/screenshots/recommendation-detail.png)
 ![Backtest](docs/screenshots/backtest.png)
 
+## Connecting a real AWS account
+
+Open a client (or **Client → + New client…**), go to the **Connections** tab and add an AWS
+connection. Collection runs in the background worker, so start it next to the API:
+
+```sh
+cd backend && arq app.workers.main.WorkerSettings
+```
+
+The API and the worker read AWS credentials from the machine they run on.
+
+**Local AWS profile** (simplest, for testing your own account): enter a profile name from
+`~/.aws/config` (or leave it empty for the default credential chain). With AWS SSO run
+`aws sso login --profile <name>` first. The profile needs these read-only permissions
+(an administrator already has them):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "ce:GetCostAndUsage", "ce:GetDimensionValues", "ce:GetReservationUtilization",
+      "ce:GetReservationPurchaseRecommendation", "ce:GetSavingsPlansUtilizationDetails",
+      "ce:GetSavingsPlansPurchaseRecommendation",
+      "savingsplans:DescribeSavingsPlans", "savingsplans:DescribeSavingsPlansOfferingRates",
+      "ec2:DescribeRegions", "ec2:DescribeReservedInstances", "rds:DescribeReservedDBInstances",
+      "elasticache:DescribeReservedCacheNodes", "redshift:DescribeReservedNodes",
+      "es:DescribeReservedInstances", "memorydb:DescribeReservedNodes",
+      "organizations:DescribeOrganization", "organizations:ListAccounts",
+      "pricing:GetProducts", "s3:ListBucket", "s3:GetObject"
+    ],
+    "Resource": "*"
+  }]
+}
+```
+
+**Cross-account role** (how a real client connects): the tool generates an ExternalId and shows
+the `aws cloudformation deploy` command for `infra/client-readonly-role.yaml`. Run it in the
+account to analyse, with `ToolAccountId` set to the account whose credentials the tool runs
+with (for a test on your own machine: your own account ID; set `TOOL_AWS_ACCOUNT_ID` in
+`backend/.env` to have it filled in). Paste the `RoleArn` stack output into the connection.
+
+Then **Test connection** (STS identity, one Cost Explorer call, account list) and **Collect
+data**. Without a Data Export, history comes from a 13-month Cost Explorer backfill (daily).
+Cost Explorer bills **$0.01 per API call**; a first collection makes roughly 50–100 calls and the
+run table shows the exact count. Responses are cached for 24 hours. When collection finishes the
+analysis re-runs and the dashboard shows the plan. Small accounts often get no recommendations;
+the **Not committed** tab says why for each usage pool.
+
+Notes: Cost Explorer must be enabled for the account (Billing console); regions or services the
+credentials can't read are recorded as warnings on the run instead of failing it.
+
 ## Prerequisites
 
 - Python 3.12

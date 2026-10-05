@@ -241,3 +241,59 @@ export interface Commitment {
   recent_utilization_pct: number | null;
   utilization: { date: string; utilization_pct: number; unused_cost: number | null }[];
 }
+
+export interface CollectionRunInfo {
+  id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+  rows_ingested: number | null;
+  api_calls: number | null;
+  cost_explorer_calls: number;
+  cost_explorer_usd: number | null;
+  period_start: string;
+  period_end: string;
+  sources: string[];
+  warnings: string[];
+  prices_synced: number | null;
+}
+
+export interface Connection {
+  id: string;
+  tenant_id: string;
+  provider: "aws" | "azure";
+  name: string;
+  status: string;
+  last_verified_at: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  aws_auth_mode: "profile" | "role";
+  aws_profile: string | null;
+  aws_role_arn: string | null;
+  aws_external_id: string | null;
+  aws_export_bucket: string | null;
+  aws_export_prefix: string | null;
+  azure_tenant_id: string | null;
+  azure_agreement_type: string | null;
+  azure_billing_scope: string | null;
+  azure_export_container: string | null;
+  azure_client_id: string | null;
+  azure_credential_ref: string | null;
+  deploy_command?: string;
+  runs: CollectionRunInfo[];
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  message: string;
+  identity?: { account: string; arn: string };
+  accounts?: { id: string; name: string | null; is_payer?: boolean }[];
+  api_calls?: Record<string, number>;
+}
+
+export type ConnectionInput = Partial<Omit<Connection, "id" | "tenant_id" | "status" | "runs" | "deploy_command">> & {
+  provider: "aws" | "azure";
+  name: string;
+};

@@ -9,3 +9,5 @@ from app.workers.tasks import collect_usage, refresh_prices, run_analysis
 class WorkerSettings:
     functions = (collect_usage, run_analysis, refresh_prices)
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
+    # A first collection backfills 13 months from Cost Explorer.
+    job_timeout = 1800

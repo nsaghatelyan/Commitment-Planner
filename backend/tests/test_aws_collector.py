@@ -125,6 +125,10 @@ def test_assume_role_with_external_id():
 
 def test_connection_test_and_org_accounts():
     stubs = Stubs()
+    stubs.stub("sts").add_response(
+        "get_caller_identity",
+        {"Account": "111111111111", "Arn": "arn:aws:iam::111111111111:root", "UserId": "AIDAX"},
+    )
     stubs.stub("ce").add_response(
         "get_cost_and_usage",
         {"ResultsByTime": []},
@@ -150,6 +154,7 @@ def test_connection_test_and_org_accounts():
         ("222222222222", "prod", False),
     ]
     assert c.stats.calls == {
+        "sts:GetCallerIdentity": 1,
         "ce:GetCostAndUsage": 1,
         "organizations:DescribeOrganization": 1,
         "organizations:ListAccounts": 2,

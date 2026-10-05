@@ -74,7 +74,8 @@ def parse_product(service_code: str, product_json: str | dict, today: date) -> l
     for term in item.get("terms", {}).get("Reserved", {}).values():
         ta = term.get("termAttributes", {})
         months = LEASE_MONTHS.get(ta.get("LeaseContractLength", ""))
-        if not months:
+        # Standard RIs only; convertible ones would collide on the price identity.
+        if not months or ta.get("OfferingClass", "standard") != "standard":
             continue
         upfront = Decimal(0)
         hourly = Decimal(0)
@@ -150,14 +151,18 @@ def savings_plan_rates(
     regions: list[str],
     today: date,
     plan_types: tuple[str, ...] = ("Compute", "EC2Instance"),
+    instance_types: list[str] | None = None,
 ) -> Iterator[PriceRecord]:
     token = None
+    filters = [{"name": "region", "values": regions}]
+    if instance_types:
+        filters.append({"name": "instanceType", "values": instance_types})
     while True:
         kwargs: dict[str, Any] = {
             "savingsPlanTypes": list(plan_types),
             "products": ["EC2"],
             "serviceCodes": ["AmazonEC2"],
-            "filters": [{"name": "region", "values": regions}],
+            "filters": filters,
             "maxResults": 1000,
         }
         if token:

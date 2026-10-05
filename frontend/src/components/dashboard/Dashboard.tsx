@@ -11,15 +11,18 @@ import { RISK_PROFILES, type AnalysisRun, type Commitment, type DailyUsage, type
 
 import { BacktestPanel } from "./BacktestPanel";
 import { CommitmentsPanel } from "./CommitmentsPanel";
+import { ConnectionsPanel } from "./ConnectionsPanel";
 import { ExcludedPanel } from "./ExcludedPanel";
 import { NativeComparison } from "./NativeComparison";
+import { NewClientDialog } from "./NewClientDialog";
 import { Overview } from "./Overview";
 import { PlanTable } from "./PlanTable";
 import { RecommendationDetail } from "./RecommendationDetail";
 
-type Tab = "overview" | "plan" | "native" | "commitments" | "excluded" | "backtest";
+type Tab = "overview" | "plan" | "native" | "commitments" | "excluded" | "backtest" | "connections";
 
 function cloudsLabel(t: TenantSummary) {
+  if (!t.connections.length) return "no connections";
   return t.connections
     .map((c) => (c.provider === "aws" ? "AWS" : `Azure${c.agreement_type ? ` ${c.agreement_type.toUpperCase()}` : ""}`))
     .join(" + ");
@@ -40,6 +43,7 @@ export function Dashboard({ tenantId }: { tenantId: string }) {
   const [commitments, setCommitments] = useState<Commitment[] | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "missing" | "running" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
+  const [newClient, setNewClient] = useState(false);
 
   const setParam = useCallback(
     (changes: Record<string, string | null>) => {
@@ -119,7 +123,11 @@ export function Dashboard({ tenantId }: { tenantId: string }) {
             <select
               aria-label="Client"
               value={tenantId}
-              onChange={(e) => router.push(`/t/${e.target.value}?risk=${risk}&tab=${tab}`)}
+              onChange={(e) =>
+                e.target.value === "__new"
+                  ? setNewClient(true)
+                  : router.push(`/t/${e.target.value}?risk=${risk}&tab=${tab}`)
+              }
               className="h-8 rounded-lg border border-border bg-surface px-2 text-[13px] text-text outline-none focus:border-accent"
             >
               {tenants.map((t) => (
@@ -128,6 +136,7 @@ export function Dashboard({ tenantId }: { tenantId: string }) {
                 </option>
               ))}
               {!tenant && <option value={tenantId}>Loading…</option>}
+              <option value="__new">+ New client…</option>
             </select>
           </label>
           <div className="flex items-center gap-2 text-[12px] text-text-2">
@@ -163,13 +172,24 @@ export function Dashboard({ tenantId }: { tenantId: string }) {
               { value: "commitments", label: "Existing commitments", count: commitments?.length },
               { value: "excluded", label: "Not committed", count: summary?.skipped_pools.length },
               { value: "backtest", label: "Backtest" },
+              { value: "connections", label: "Connections" },
             ]}
           />
         </div>
       </header>
 
       <main className="mx-auto max-w-[1440px] px-6 py-6">
-        {state === "loading" && (
+        {tab === "connections" && (
+          <ConnectionsPanel
+            tenantId={tenantId}
+            onAnalysisReady={() => {
+              loadRun();
+              api.dailyUsage(tenantId).then(setDaily).catch(() => {});
+              api.commitments(tenantId).then(setCommitments).catch(() => {});
+            }}
+          />
+        )}
+        {tab !== "connections" && state === "loading" && (
           <div className="grid gap-3 md:grid-cols-3">
             <Skeleton className="h-24" />
             <Skeleton className="h-24" />
@@ -177,19 +197,22 @@ export function Dashboard({ tenantId }: { tenantId: string }) {
             <Skeleton className="h-64 md:col-span-3" />
           </div>
         )}
-        {state === "running" && <Callout title="Running the analysis…">Simulating every hour of usage for each commitment pool. This takes a few seconds.</Callout>}
-        {state === "error" && <Callout tone="critical" title="Something went wrong">{error}</Callout>}
-        {state === "missing" && (
+        {tab !== "connections" && state === "running" && <Callout title="Running the analysis…">Simulating every hour of usage for each commitment pool. This takes a few seconds.</Callout>}
+        {tab !== "connections" && state === "error" && <Callout tone="critical" title="Something went wrong">{error}</Callout>}
+        {tab !== "connections" && state === "missing" && (
           <Callout title={`No ${risk} analysis yet`}>
-            <span className="flex items-center gap-3">
-              Run the engine for this client with the {risk} profile.
+            <span className="flex flex-wrap items-center gap-3">
+              Connect a cloud account and collect data first, or run the engine on data already collected.
+              <Button size="sm" onClick={() => setParam({ tab: "connections" })}>
+                Connections
+              </Button>
               <Button variant="primary" size="sm" onClick={rerun}>
                 Run analysis
               </Button>
             </span>
           </Callout>
         )}
-        {state === "ready" && summary && (
+        {tab !== "connections" && state === "ready" && summary && (
           <>
             {tab === "overview" && <Overview summary={summary} daily={daily} onOpenPlan={() => setParam({ tab: "plan" })} />}
             {tab === "plan" && (
@@ -227,6 +250,15 @@ export function Dashboard({ tenantId }: { tenantId: string }) {
         )}
       </main>
 
+      <NewClientDialog
+        open={newClient}
+        onClose={() => setNewClient(false)}
+        onCreated={(id) => {
+          setNewClient(false);
+          api.tenants().then(setTenants);
+          router.push(`/t/${id}?tab=connections`);
+        }}
+      />
       <RecommendationDetail rec={selected} activeProfile={risk} onClose={() => setParam({ rec: null })} onStatus={onStatus} />
     </div>
   );

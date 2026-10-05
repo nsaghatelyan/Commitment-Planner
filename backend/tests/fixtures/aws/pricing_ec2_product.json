@@ -14,7 +14,7 @@
           "a": {"unit": "Quantity", "pricePerUnit": {"USD": "8760"}},
           "b": {"unit": "Hrs", "pricePerUnit": {"USD": "0.0000000000"}}}},
       "QG5G45WKDWDDHTFV.4NA7Y494T4": {"termAttributes": {"LeaseContractLength": "3yr",
-          "OfferingClass": "convertible", "PurchaseOption": "No Upfront"},
+          "OfferingClass": "standard", "PurchaseOption": "No Upfront"},
         "priceDimensions": {
           "c": {"unit": "Hrs", "pricePerUnit": {"USD": "0.7500000000"}}}}
     }

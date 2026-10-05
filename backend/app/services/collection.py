@@ -36,9 +36,13 @@ def build_collector(conn: CloudConnection, settings: Settings, cache: ApiCache) 
     if conn.provider == "aws":
         from app.collectors.aws import AwsCollector
 
+        role_mode = conn.aws_auth_mode != "profile"
         return AwsCollector(
-            conn.aws_role_arn or "",
-            conn.aws_external_id or "",
+            conn.aws_role_arn if role_mode else None,
+            conn.aws_external_id if role_mode else None,
+            # Profile mode reads with the profile itself; role mode assumes the role from the
+            # tool's default credentials.
+            profile=None if role_mode else conn.aws_profile,
             export_bucket=conn.aws_export_bucket,
             export_prefix=conn.aws_export_prefix,
             region=settings.aws_region,
@@ -47,14 +51,14 @@ def build_collector(conn: CloudConnection, settings: Settings, cache: ApiCache) 
         )
     if conn.provider == "azure":
         from app.collectors.azure import AzureCollector
-        from app.collectors.azure.auth import client_credential
+        from app.collectors.azure.auth import credential_for
         from app.collectors.azure.export import ContainerBlobSource
         from app.collectors.azure.http import AzureHttp
 
-        credential = client_credential(
+        credential = credential_for(
             conn.azure_tenant_id or "",
-            settings.azure_app_client_id,
-            settings.azure_app_certificate_path,
+            conn.azure_client_id or settings.azure_app_client_id,
+            conn.azure_credential_ref or settings.azure_app_certificate_path,
         )
         source, prefix = None, ""
         if conn.azure_export_container:
@@ -110,6 +114,8 @@ def run_collection(
     settings: Settings | None = None,
     collector_factory: CollectorFactory = build_collector,
     today: date | None = None,
+    collection_run_id: Any = None,
+    sync_prices: bool = True,
 ) -> CollectionRun:
     settings = settings or get_settings()
     store = store or UsageStore(settings.usage_storage_root)
@@ -124,17 +130,19 @@ def run_collection(
         .order_by(CollectionRun.finished_at.desc())
         .limit(1)
     ).first()
-    run = CollectionRun(
-        tenant_id=conn.tenant_id,
-        cloud_connection_id=conn.id,
-        status="running",
-        period_start=today,
-        period_end=today,
-        usage_location=store.uri,
-        started_at=utc_now(),
-        details={},
-    )
-    session.add(run)
+    run = session.get(CollectionRun, collection_run_id) if collection_run_id else None
+    if run is None:
+        run = CollectionRun(
+            tenant_id=conn.tenant_id,
+            cloud_connection_id=conn.id,
+            period_start=today,
+            period_end=today,
+            details={},
+        )
+        session.add(run)
+    run.status = "running"
+    run.usage_location = store.uri
+    run.started_at = utc_now()
     session.commit()
 
     cache = ApiCache(settings.api_cache_dir, settings.api_cache_ttl_hours * 3600)
@@ -195,6 +203,15 @@ def run_collection(
         )
         details["commitments"] = len(commitments)
 
+        # 4. Public prices for what this client actually runs, so the engine can size them.
+        if sync_prices:
+            from app.services.pricing import sync_prices_for_usage
+
+            try:
+                details["prices_synced"] = sync_prices_for_usage(session, store, conn, collector)
+            except Exception as exc:  # noqa: BLE001 - prices are best effort
+                details.setdefault("warnings", []).append(f"Price sync: {exc}")
+
         run.status = "succeeded"
         conn.status = "active"
         conn.last_success_at = utc_now()
@@ -215,6 +232,8 @@ def run_collection(
         run.api_calls = collector.stats.total
         details["api_calls"] = collector.stats.calls
         details["cache_hits"] = collector.stats.cache_hits
+        if getattr(collector, "warnings", None):
+            details["warnings"] = details.get("warnings", []) + collector.warnings
         details["cost_explorer_usd"] = round(
             0.01 * sum(n for api, n in collector.stats.calls.items() if api.startswith("ce:")), 2
         )

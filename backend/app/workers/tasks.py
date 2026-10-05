@@ -9,17 +9,31 @@ DEFAULT_AWS_PRICE_REGIONS = ("us-east-1", "us-east-2", "us-west-2", "eu-west-1",
 DEFAULT_AZURE_PRICE_REGIONS = ("eastus", "eastus2", "westus2", "westeurope", "northeurope")
 
 
-def _collect(cloud_connection_id: str) -> dict[str, Any]:
+def _collect(
+    cloud_connection_id: str, collection_run_id: str | None, analyze: bool
+) -> dict[str, Any]:
+    from app.services.analysis import run_analysis as analyze_tenant
     from app.services.collection import run_collection
 
     with SessionLocal() as session:
-        run = run_collection(session, cloud_connection_id)
-        return {"run_id": str(run.id), "status": run.status, "rows": run.rows_ingested}
+        run = run_collection(session, cloud_connection_id, collection_run_id=collection_run_id)
+        out = {"run_id": str(run.id), "status": run.status, "rows": run.rows_ingested}
+        if analyze and run.status == "succeeded":
+            analysis = analyze_tenant(session, run.tenant_id)
+            out["analysis_run_id"] = str(analysis.id)
+            out["analysis_status"] = analysis.status
+        return out
 
 
-async def collect_usage(ctx: dict[str, Any], cloud_connection_id: str) -> dict[str, Any]:
-    """Pull usage, commitments, utilization and native recommendations for one connection."""
-    return await asyncio.to_thread(_collect, cloud_connection_id)
+async def collect_usage(
+    ctx: dict[str, Any],
+    cloud_connection_id: str,
+    collection_run_id: str | None = None,
+    analyze: bool = True,
+) -> dict[str, Any]:
+    """Pull usage, commitments, utilization, native recommendations and prices for one
+    connection, then (by default) re-run the analysis for its client."""
+    return await asyncio.to_thread(_collect, cloud_connection_id, collection_run_id, analyze)
 
 
 def _analyze(tenant_id: str, analysis_run_id: str | None, risk_profile: str | None):

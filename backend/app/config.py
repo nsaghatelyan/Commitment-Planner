@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     # AWS: our own account. Clients' roles are assumed from these credentials.
     aws_region: str = "us-east-1"
     aws_role_session_name: str = "savings-tool"
+    # The tool's AWS account ID, shown in the client's CloudFormation command (role mode).
+    tool_aws_account_id: str = ""
 
     # Azure: our multi-tenant Entra app, authenticating with a certificate.
     azure_app_client_id: str = ""

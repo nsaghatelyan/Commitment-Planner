@@ -59,13 +59,22 @@ class CloudConnection(IdMixin, TimestampMixin, Base):
     tenant_id: Mapped[uuid.UUID] = tenant_fk()
     provider: Mapped[str] = mapped_column(String(16), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
-    # AWS
+    # AWS. auth mode "role": assume aws_role_arn with aws_external_id (the client's account).
+    # "profile": use an AWS CLI profile on the machine running the tool (local testing).
+    aws_auth_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="role", server_default="role"
+    )
+    aws_profile: Mapped[str | None] = mapped_column(String(128))
     aws_role_arn: Mapped[str | None] = mapped_column(String(2048))
     aws_external_id: Mapped[str | None] = mapped_column(String(256), unique=True)
     aws_export_bucket: Mapped[str | None] = mapped_column(String(255))
     aws_export_prefix: Mapped[str | None] = mapped_column(String(1024))
     # Azure
     azure_tenant_id: Mapped[str | None] = mapped_column(String(64))
+    # App registration to sign in with (defaults to the tool's multi-tenant app) and where its
+    # credential lives: a certificate path, or "env:VAR" naming a client-secret env variable.
+    azure_client_id: Mapped[str | None] = mapped_column(String(64))
+    azure_credential_ref: Mapped[str | None] = mapped_column(String(1024))
     # ea | mca | payg | csp
     azure_agreement_type: Mapped[str | None] = mapped_column(String(8))
     azure_billing_scope: Mapped[str | None] = mapped_column(String(1024))

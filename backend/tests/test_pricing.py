@@ -28,6 +28,14 @@ def test_aws_product_on_demand_and_ri():
     assert ri_3y.price_per_unit == Decimal("0.75000000") and ri_3y.payment_option == "no_upfront"
 
 
+def test_convertible_ri_offerings_are_skipped():
+    product = fixture_json("aws/pricing_ec2_product.json")
+    for term in product["terms"]["Reserved"].values():
+        term["termAttributes"]["OfferingClass"] = "convertible"
+    records = aws.parse_product("AmazonEC2", product, TODAY)
+    assert [r.pricing_model for r in records] == ["on_demand"]
+
+
 def test_aws_pricing_pagination():
     client = boto3.client(
         "pricing", region_name="us-east-1", aws_access_key_id="x", aws_secret_access_key="x"

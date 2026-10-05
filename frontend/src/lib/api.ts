@@ -1,6 +1,10 @@
 import type {
   AnalysisRun,
+  CollectionRunInfo,
   Commitment,
+  Connection,
+  ConnectionInput,
+  ConnectionTestResult,
   DailyUsage,
   Recommendation,
   RiskProfile,
@@ -45,6 +49,23 @@ export const api = {
   dailyUsage: (tenantId: string, days = 90) =>
     request<DailyUsage>(`/tenants/${tenantId}/usage/daily?days=${days}`),
   commitments: (tenantId: string) => request<Commitment[]>(`/tenants/${tenantId}/commitments`),
+  createTenant: (name: string, risk_profile: RiskProfile) =>
+    request<{ id: string; name: string; slug: string }>("/tenants", {
+      method: "POST",
+      body: JSON.stringify({ name, risk_profile }),
+    }),
+  connections: (tenantId: string) => request<Connection[]>(`/tenants/${tenantId}/connections`),
+  createConnection: (tenantId: string, body: ConnectionInput) =>
+    request<Connection>(`/tenants/${tenantId}/connections`, { method: "POST", body: JSON.stringify(body) }),
+  updateConnection: (id: string, body: Partial<ConnectionInput>) =>
+    request<Connection>(`/connections/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteConnection: async (id: string) => {
+    const res = await fetch(`/api/connections/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new ApiError(res.status, res.statusText);
+  },
+  testConnection: (id: string) => request<ConnectionTestResult>(`/connections/${id}/test`, { method: "POST" }),
+  collect: (id: string, analyze = true) =>
+    request<CollectionRunInfo>(`/connections/${id}/collect`, { method: "POST", body: JSON.stringify({ analyze }) }),
   setStatus: (recId: string, status: Recommendation["status"]) =>
     request<{ id: string; status: string }>(`/recommendations/${recId}`, {
       method: "PATCH",

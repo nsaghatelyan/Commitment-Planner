@@ -112,7 +112,12 @@ export function Overview({ summary, daily, onOpenPlan }: { summary: Summary; dai
               <span className="shrink-0 font-medium tabular text-good-text">+{money(p.monthly_savings)}/mo</span>
             </li>
           ))}
-          {summary.purchase_plan.length === 0 && <Empty>Nothing to buy right now.</Empty>}
+          {summary.purchase_plan.length === 0 && (
+            <Empty>
+              No commitments recommended: there isn&apos;t enough steady usage to commit to
+              {summary.skipped_pools.length ? " (see Not committed for each pool's reason)" : ""}.
+            </Empty>
+          )}
         </ol>
       </Card>
     </div>

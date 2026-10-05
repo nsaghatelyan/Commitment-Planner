@@ -29,15 +29,17 @@ ClientFactory = Callable[[str, str | None], Any]
 
 
 class AwsCollector(Collector):
-    """Reads a client's AWS org through their read-only role (assumed with ExternalId)."""
+    """Reads a client's AWS org, either through their read-only role (assumed with the
+    ExternalId) or, for local testing, straight from an AWS CLI profile on this machine."""
 
     provider = "aws"
 
     def __init__(
         self,
-        role_arn: str,
-        external_id: str,
+        role_arn: str | None,
+        external_id: str | None,
         *,
+        profile: str | None = None,
         export_bucket: str | None = None,
         export_prefix: str | None = None,
         region: str = "us-east-1",
@@ -49,6 +51,9 @@ class AwsCollector(Collector):
     ) -> None:
         self.role_arn = role_arn
         self.external_id = external_id
+        self.profile = profile
+        self.warnings: list[str] = []
+        self._has_savings_plans = True
         self.export_bucket = export_bucket
         self.export_prefix = export_prefix or ""
         self.region = region
@@ -69,10 +74,19 @@ class AwsCollector(Collector):
                 self._clients[key] = self._client_factory(service, region)
             else:
                 if self._session is None:
-                    self.call.stats.record("sts:AssumeRole")
-                    self._session = assumed_role_session(
-                        self.role_arn, self.external_id, self.session_name, self.region
-                    )
+                    if self.role_arn:
+                        self.call.stats.record("sts:AssumeRole")
+                        self._session = assumed_role_session(
+                            self.role_arn,
+                            self.external_id or "",
+                            self.session_name,
+                            self.region,
+                            base_session=boto3.Session(profile_name=self.profile or None),
+                        )
+                    else:
+                        self._session = boto3.Session(
+                            profile_name=self.profile or None, region_name=self.region
+                        )
                 self._clients[key] = self._session.client(
                     service, region_name=region or self.region
                 )
@@ -85,7 +99,13 @@ class AwsCollector(Collector):
             self._account_id = ident["Account"]
         return self._account_id
 
+    def identity(self) -> dict[str, str]:
+        ident = self.call("sts:GetCallerIdentity", self.client("sts").get_caller_identity)
+        self._account_id = ident["Account"]
+        return {"account": ident["Account"], "arn": ident["Arn"]}
+
     def test_connection(self) -> None:
+        self.identity()
         end = utc_today()
         self.call(
             "ce:GetCostAndUsage",
@@ -137,13 +157,38 @@ class AwsCollector(Collector):
         resp = self.call("ec2:DescribeRegions", self.client("ec2").describe_regions)
         return sorted(r["RegionName"] for r in resp.get("Regions", []))
 
+    def _warn(self, message: str) -> None:
+        if message not in self.warnings:
+            self.warnings.append(message)
+
+    def _try(self, label: str, fn, default):
+        from botocore.exceptions import BotoCoreError
+
+        from app.collectors.aws.errors import explain
+
+        try:
+            return fn()
+        except (ClientError, BotoCoreError) as exc:
+            self._warn(f"{label}: {explain(exc)}")
+            return default
+
     def collect_commitments(self) -> list[CommitmentRecord]:
-        records = cm.savings_plans(self.client("savingsplans"), self.call)
-        records += cm.reserved_instances(self.client, self.call, self.regions(), self.account_id)
+        records = self._try(
+            "Savings Plans", lambda: cm.savings_plans(self.client("savingsplans"), self.call), []
+        )
+        self._has_savings_plans = bool(records)
+        regions = self._try("EC2 regions", self.regions, [self.region])
+        records += cm.reserved_instances(
+            self.client, self.call, regions, self.account_id, warn=self._warn
+        )
         # Reservations owned by member accounts (and DynamoDB reserved capacity) are only
         # visible org-wide through Cost Explorer.
         end = utc_today()
-        _, ri_attrs = cm.ri_utilization(self.client("ce"), self.call, end - timedelta(days=7), end)
+        _, ri_attrs = self._try(
+            "Reservation utilization",
+            lambda: cm.ri_utilization(self.client("ce"), self.call, end - timedelta(days=7), end),
+            ([], {}),
+        )
         known = {r.provider_commitment_id for r in records}
         known |= {r.provider_commitment_id.rsplit(":", 1)[-1] for r in records}
         for rid, attrs in ri_attrs.items():
@@ -155,12 +200,31 @@ class AwsCollector(Collector):
 
     def collect_utilization(self, start: date, end: date) -> list[UtilizationRecord]:
         ce = self.client("ce")
-        ri, _ = cm.ri_utilization(ce, self.call, start, end)
-        sp, _ = cm.sp_utilization(ce, self.call, start, end)
+        ri, _ = self._try(
+            "Reservation utilization",
+            lambda: cm.ri_utilization(ce, self.call, start, end),
+            ([], {}),
+        )
+        if not self._has_savings_plans:
+            # One billed call per day; skip it when there is nothing to measure.
+            return ri
+        sp, _ = self._try(
+            "Savings Plans utilization",
+            lambda: cm.sp_utilization(ce, self.call, start, end),
+            ([], {}),
+        )
         return ri + sp
 
     def collect_native_recommendations(self) -> list[NativeRecommendation]:
         ce = self.client("ce")
-        return savings_plan_recommendations(
-            ce, self.call, self.rec_terms, self.rec_payments
-        ) + reservation_recommendations(ce, self.call, self.rec_terms, self.rec_payments)
+        sp = self._try(
+            "Savings Plans recommendations",
+            lambda: savings_plan_recommendations(ce, self.call, self.rec_terms, self.rec_payments),
+            [],
+        )
+        ri = self._try(
+            "Reservation recommendations",
+            lambda: reservation_recommendations(ce, self.call, self.rec_terms, self.rec_payments),
+            [],
+        )
+        return sp + ri

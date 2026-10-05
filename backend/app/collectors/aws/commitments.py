@@ -163,14 +163,37 @@ def _ri(
     )
 
 
+def _tolerant(call: CountingCaller, warn, api: str, fn, **kwargs) -> dict:
+    """A Describe call that may fail for one region/service without failing collection
+    (service not offered in the region, or not allowed by the IAM policy)."""
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    from app.collectors.aws.errors import explain
+
+    try:
+        return call(api, fn, **kwargs)
+    except (ClientError, BotoCoreError) as exc:
+        if warn:
+            warn(f"{api}: {explain(exc)}")
+        return {}
+
+
 def reserved_instances(
-    session_client, call: CountingCaller, regions: list[str], account_id: str | None
+    session_client,
+    call: CountingCaller,
+    regions: list[str],
+    account_id: str | None,
+    warn=None,
 ) -> list[CommitmentRecord]:
     """session_client(service, region) -> boto3 client."""
     out: list[CommitmentRecord] = []
+
+    def call_(api, fn, **kwargs):
+        return _tolerant(call, warn, f"{api} ({region})", fn, **kwargs)
+
     for region in regions:
         ec2 = session_client("ec2", region)
-        resp = call(
+        resp = call_(
             "ec2:DescribeReservedInstances",
             ec2.describe_reserved_instances,
             Filters=[{"Name": "state", "Values": ["active", "payment-pending"]}],
@@ -202,7 +225,7 @@ def reserved_instances(
             )
 
         rds = session_client("rds", region)
-        resp = call("rds:DescribeReservedDBInstances", rds.describe_reserved_db_instances)
+        resp = call_("rds:DescribeReservedDBInstances", rds.describe_reserved_db_instances)
         for ri in resp.get("ReservedDBInstances", []):
             if ri.get("State") not in ("active", "payment-pending"):
                 continue
@@ -233,7 +256,7 @@ def reserved_instances(
             )
 
         cache = session_client("elasticache", region)
-        resp = call("elasticache:DescribeReservedCacheNodes", cache.describe_reserved_cache_nodes)
+        resp = call_("elasticache:DescribeReservedCacheNodes", cache.describe_reserved_cache_nodes)
         for ri in resp.get("ReservedCacheNodes", []):
             if ri.get("State") not in ("active", "payment-pending"):
                 continue
@@ -261,7 +284,7 @@ def reserved_instances(
             )
 
         search = session_client("opensearch", region)
-        resp = call("opensearch:DescribeReservedInstances", search.describe_reserved_instances)
+        resp = call_("opensearch:DescribeReservedInstances", search.describe_reserved_instances)
         for ri in resp.get("ReservedInstances", []):
             if ri.get("State") not in ("active", "payment-pending"):
                 continue
@@ -288,7 +311,7 @@ def reserved_instances(
             )
 
         redshift = session_client("redshift", region)
-        resp = call("redshift:DescribeReservedNodes", redshift.describe_reserved_nodes)
+        resp = call_("redshift:DescribeReservedNodes", redshift.describe_reserved_nodes)
         for ri in resp.get("ReservedNodes", []):
             if ri.get("State") not in ("active", "payment-pending"):
                 continue
@@ -315,7 +338,7 @@ def reserved_instances(
             )
 
         memorydb = session_client("memorydb", region)
-        resp = call("memorydb:DescribeReservedNodes", memorydb.describe_reserved_nodes)
+        resp = call_("memorydb:DescribeReservedNodes", memorydb.describe_reserved_nodes)
         for ri in resp.get("ReservedNodes", []):
             if ri.get("State") not in ("active", "payment-pending"):
                 continue
