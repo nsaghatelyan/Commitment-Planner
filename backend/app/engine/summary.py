@@ -31,6 +31,7 @@ ELIGIBLE_SERVICES = [
     "Azure Database for PostgreSQL",
     "Azure Database for MySQL",
     "Azure Cache for Redis",
+    "Redis Cache",
     "Functions",
     "Azure Container Apps",
     "Azure Dedicated Host",

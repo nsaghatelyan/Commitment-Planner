@@ -18,6 +18,7 @@ from app.collectors.aws.usage_types import (
     parse_usage_type,
 )
 from app.collectors.cache import CountingCaller
+from app.pricing.keys import aws_service
 from app.usage.normalize import instance_family
 from app.usage.schema import (
     ChargeCategory,
@@ -27,19 +28,33 @@ from app.usage.schema import (
     usage_table,
 )
 
-# Cost Explorer SERVICE names whose usage commitments can cover.
+# Services a savings plan or reservation can cover (short names from app.pricing.keys), with
+# their category. They are fetched at usage-type detail so the engine can price them; matching
+# on the short name catches Cost Explorer's name variants ("Amazon SageMaker AI", ...).
 COMMITMENT_SERVICES = {
-    "Amazon Elastic Compute Cloud - Compute": "Compute",
-    "Amazon Relational Database Service": "Databases",
-    "Amazon ElastiCache": "Databases",
-    "Amazon OpenSearch Service": "Analytics",
-    "Amazon Redshift": "Analytics",
-    "Amazon MemoryDB": "Databases",
-    "Amazon DynamoDB": "Databases",
-    "AWS Lambda": "Compute",
-    "Amazon SageMaker": "AI and Machine Learning",
-    "Amazon Elastic Container Service": "Compute",
+    "ec2": "Compute",
+    "fargate": "Compute",
+    "lambda": "Compute",
+    "rds": "Databases",
+    "elasticache": "Databases",
+    "memorydb": "Databases",
+    "dynamodb": "Databases",
+    "docdb": "Databases",
+    "neptune": "Databases",
+    "timestream": "Databases",
+    "keyspaces": "Databases",
+    "dsql": "Databases",
+    "dms": "Migration and Transfer",
+    "opensearch": "Analytics",
+    "redshift": "Analytics",
+    "sagemaker": "AI and Machine Learning",
 }
+
+
+def commitment_category(service_name: str | None) -> str | None:
+    """Category of a Cost Explorer SERVICE that commitments can cover, else None."""
+    return COMMITMENT_SERVICES.get(aws_service(service_name) or "")
+
 
 USAGE_RECORD_TYPES = ["Usage", "DiscountedUsage", "SavingsPlanCoveredUsage"]
 METRICS = ["AmortizedCost", "UnblendedCost", "UsageQuantity", "NormalizedUsageAmount"]
@@ -129,7 +144,7 @@ class CostExplorerBootstrap:
             by_class.setdefault(classify_purchase_type(value), []).append(value)
 
         rows: list[dict[str, Any]] = []
-        eligible = [s for s in services if s in COMMITMENT_SERVICES]
+        eligible = [s for s in services if commitment_category(s)]
         record_filter = _dim("RECORD_TYPE", USAGE_RECORD_TYPES)
         detail_groups = ["USAGE_TYPE", "OPERATION"]
         for service in eligible:
@@ -142,7 +157,7 @@ class CostExplorerBootstrap:
                     if row:
                         rows.append(self._apply_detail(row, service, klass))
 
-        others = [s for s in services if s not in COMMITMENT_SERVICES]
+        others = [s for s in services if not commitment_category(s)]
         if others:
             other_groups = ["SERVICE", "LINKED_ACCOUNT"]
             for day, keys, metrics in self.cost_and_usage(
@@ -175,7 +190,7 @@ class CostExplorerBootstrap:
             return None
         if "SERVICE" in keys:
             row["service_name"] = keys["SERVICE"]
-            row["service_category"] = COMMITMENT_SERVICES.get(keys["SERVICE"])
+            row["service_category"] = commitment_category(keys["SERVICE"])
         if "LINKED_ACCOUNT" in keys:
             row["sub_account_id"] = keys["LINKED_ACCOUNT"]
         if "REGION" in keys:
@@ -204,7 +219,7 @@ class CostExplorerBootstrap:
 
     def _apply_detail(self, row: dict[str, Any], service: str, klass: str) -> dict[str, Any]:
         row["service_name"] = service
-        row["service_category"] = COMMITMENT_SERVICES[service]
+        row["service_category"] = commitment_category(service)
         if klass == "spot":
             row["pricing_category"] = PricingCategory.SPOT.value
             row["on_demand_equiv_cost"] = row["list_cost"] = None

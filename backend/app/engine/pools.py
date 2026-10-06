@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from app.collectors import types as k
 from app.engine.data import UsageGroup
-from app.pricing.keys import aws_service, strip_region
+from app.pricing.keys import aws_service, azure_service, strip_region
 
 # LAYER_COMPUTE_SP holds the account-wide, region-flexible plans: Compute, Database and
 # SageMaker Savings Plans (they cover disjoint services, so they share the last layer).
@@ -43,7 +43,7 @@ AZURE_RI_QTY_SERVICES = {
     "Azure App Service": "instances",
     "Azure Database for PostgreSQL": "instances",
     "Azure Database for MySQL": "instances",
-    "Azure Cache for Redis": "instances",
+    "Redis Cache": "instances",  # Azure Cache for Redis (see AZURE_SERVICE_ALIASES)
 }
 
 
@@ -153,7 +153,7 @@ def ri_pool(g: UsageGroup) -> Pool | None:
             itype,
             measure="qty",
         )
-    service = a["service_name"]
+    service = azure_service(a["service_name"])
     if service == "Virtual Machines":
         if (a["operating_system"] or "Linux") != "Linux" or not a["instance_family"]:
             return None
@@ -219,6 +219,6 @@ def sp_pools(g: UsageGroup) -> list[Pool]:
                 )
             )
         return out
-    if a["service_name"] in AZURE_SP_SERVICES:
+    if azure_service(a["service_name"]) in AZURE_SP_SERVICES:
         return [Pool(LAYER_COMPUTE_SP, "azure", k.AZURE_SP_COMPUTE, "sp", "compute", measure="od")]
     return []

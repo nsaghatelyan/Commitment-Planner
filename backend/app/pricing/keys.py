@@ -136,7 +136,17 @@ def azure_os(product_name: str | None) -> str | None:
     return "Windows" if "windows" in product_name.lower() else "Linux"
 
 
+# Azure names some services differently per source; keys and pools use the Cost Management
+# Query API / Retail Prices name. FOCUS exports say "Azure Cache for Redis".
+AZURE_SERVICE_ALIASES = {"Azure Cache for Redis": "Redis Cache"}
+
+
+def azure_service(service_name: str | None) -> str | None:
+    return AZURE_SERVICE_ALIASES.get(service_name or "", service_name)
+
+
 def azure_sku_key(service_name: str, sku: str, os_name: str | None = None) -> str:
+    service_name = azure_service(service_name) or ""
     parts = ["azure", service_name, sku]
     if service_name == "Virtual Machines" and os_name:
         parts.append(os_name)
