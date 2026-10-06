@@ -195,6 +195,7 @@ class CostExplorerBootstrap:
             row["database_engine"] = database_engine(keys["OPERATION"])
         if "USAGE_TYPE" in keys and "OPERATION" in keys:
             row["sku_id"] = f"{keys['USAGE_TYPE']}|{keys['OPERATION']}"
+            row["usage_type"], row["operation"] = keys["USAGE_TYPE"], keys["OPERATION"]
         row["instance_family"] = instance_family(row.get("instance_type"))
         if row["pricing_category"] == PricingCategory.ON_DEMAND.value:
             row["on_demand_equiv_cost"] = row["billed_cost"]

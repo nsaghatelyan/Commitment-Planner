@@ -253,6 +253,8 @@ Profiles (deterministic):
   to m7i, growing workload, staging, nightly batch, Spot, a new workload, Windows, SQL Server
   RDS, an ElastiCache cluster with 4 of 6 nodes reserved and expiring.
 - `startup` (AWS + Azure PAYG, 21 days, no commitments).
+- `data` (AWS, 120 days, no commitments): RDS, ElastiCache, DynamoDB provisioned capacity,
+  DocumentDB, Lambda and SageMaker - one of each non-EC2 commitment type.
 
 `app.synthetic.analysis.analyze_synthetic(tenant, store)` runs the engine on a tenant directly.
 
@@ -263,14 +265,16 @@ reservations by simulating them over the tenant's hourly usage, and stores the r
 the providers' own (native) recommendations:
 
 1. **Baseline** per commitment pool (reservations by family/region/OS or exact type,
-   EC2 Instance SP by family/region, Compute SP / Azure SP across compute), excluding Spot
+   EC2 Instance SP by family/region, Compute / Database / SageMaker SPs and the Azure SP
+   account-wide), excluding Spot
    and usage already under commitments - except those ending within 90 days, which count as
    ending so renewals are recommended (kept to the same commitment type).
 2. **Stability**: percentiles, trend, weekday/weekend, business-hours and nightly patterns,
    abrupt step changes (migrations, decommissions). After a step only later data is used;
    ramps commit to the recent floor; workloads younger than 21 days wait.
 3. **Layering** as the providers apply it: reservations, then EC2 Instance SPs, then
-   Compute / Azure SPs, each sized on what earlier layers leave uncovered. Stranded
+   Compute / Database / SageMaker / Azure SPs, each sized on what earlier layers leave
+   uncovered. A savings plan only counts usage it has a rate for (not storage, I/O, backups). Stranded
    reservations are exchanged into the replacing usage first where the provider allows it.
 4. **Sizing**: every hour is simulated for each candidate size; conservative ~P10, balanced =
    net-savings optimum, aggressive = higher coverage, never below the profile's target
@@ -290,11 +294,28 @@ curl localhost:8000/tenants/<id>/analysis-runs/latest
 curl "localhost:8000/tenants/<id>/analysis-runs/<run id>/recommendations?source=engine"
 ```
 
+Coverage (AWS):
+
+| Usage | Reservations | Savings Plans |
+|---|---|---|
+| EC2 | Linux, shared tenancy (size-flexible) | EC2 Instance, Compute |
+| Fargate, Lambda | - | Compute |
+| SageMaker | - | SageMaker |
+| RDS / Aurora, ElastiCache, OpenSearch | instances / nodes | Database |
+| DynamoDB | provisioned read/write capacity (1 year, blocks of 100) | Database (also on-demand) |
+| Redshift (nodes, Serverless RPUs), MemoryDB | yes | - |
+| DocumentDB, Neptune, Timestream, DMS, Keyspaces, Aurora DSQL | - (none sold) | Database |
+
+Database Savings Plans are 1-year No Upfront only.
+
 ## Pricing
 
 `refresh_prices` (worker job) loads public prices into the `price` table: AWS Pricing API
 (on-demand and RI) and Savings Plans offering rates, using the tool's own AWS credentials, and
-the Azure Retail Prices API (no auth). `sku_key` conventions are in `app/pricing/keys.py`.
+the Azure Retail Prices API (no auth). After a collection, only the prices of what that client
+uses are synced. EC2 is keyed by instance type, OS and tenancy; every other AWS service by the
+usage type and operation it is billed under, which usage (Cost Explorer, CUR, FOCUS), the
+Pricing API and Savings Plans rates all carry (`app/pricing/keys.py`).
 
 ## Migrations
 

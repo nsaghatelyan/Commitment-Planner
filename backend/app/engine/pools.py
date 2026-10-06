@@ -6,13 +6,25 @@ from dataclasses import dataclass
 
 from app.collectors import types as k
 from app.engine.data import UsageGroup
-from app.pricing.keys import AWS_SERVICES
+from app.pricing.keys import aws_service, strip_region
 
-# LAYER_COMPUTE_SP holds the account-wide, region-flexible plans: Compute Savings Plans and
-# Database Savings Plans (they cover disjoint services, so they share the last layer).
+# LAYER_COMPUTE_SP holds the account-wide, region-flexible plans: Compute, Database and
+# SageMaker Savings Plans (they cover disjoint services, so they share the last layer).
 LAYER_RI, LAYER_INSTANCE_SP, LAYER_COMPUTE_SP = 1, 2, 3
-# Usage Database Savings Plans cover that the engine prices (see app.pricing.aws).
-AWS_DATABASE_SP_SERVICES = ("rds", "opensearch")
+# AWS services sold as instance/node reservations (DynamoDB and Redshift Serverless capacity
+# reservations are handled separately). DocumentDB, Neptune, Timestream, DMS, Keyspaces and
+# Aurora DSQL have no reservations: only Database Savings Plans.
+AWS_RI_SERVICES = ("ec2", "rds", "elasticache", "opensearch", "redshift", "memorydb")
+# DynamoDB reserved capacity: provisioned read/write capacity units (Standard table class).
+DYNAMODB_RESERVED = {
+    "ReadCapacityUnit-Hrs": "read capacity units",
+    "WriteCapacityUnit-Hrs": "write capacity units",
+}
+AWS_COMPUTE_SP_SERVICES = ("ec2", "fargate", "lambda")
+AWS_DATABASE_SP_SERVICES = (
+    "rds", "elasticache", "opensearch", "dynamodb", "docdb", "neptune", "timestream", "dms",
+    "keyspaces", "dsql",
+)  # fmt: skip
 
 # RDS engines whose reservations are not size-flexible (license included).
 RDS_EXACT_ENGINES = ("SQL Server", "Oracle SE1 (LI)", "Oracle SE2 (LI)", "Oracle SE (LI)")
@@ -86,8 +98,18 @@ def ri_pool(g: UsageGroup) -> Pool | None:
     if not region:
         return None
     if a["provider"] == "aws":
-        service = AWS_SERVICES.get(a["service_name"] or "")
-        if not itype or service in (None, "fargate", "lambda"):
+        service = aws_service(a["service_name"])
+        usage = strip_region(a["usage_type"] or "")
+        if service == "dynamodb":
+            label = DYNAMODB_RESERVED.get(usage)
+            if not label:
+                return None
+            return Pool(LAYER_RI, "aws", k.AWS_RI, "ri", "dynamodb", region, None, label,
+                        measure="qty")  # fmt: skip
+        if service == "redshift" and usage.startswith("Redshift:ServerlessUsage"):
+            return Pool(LAYER_RI, "aws", k.AWS_RI, "ri", "redshift", region, None,
+                        "Serverless RPUs", measure="qty")  # fmt: skip
+        if not itype or service not in AWS_RI_SERVICES:
             return None
         if service == "ec2":
             # Linux, shared tenancy: regional and size-flexible. Other platforms: SP only.
@@ -155,7 +177,7 @@ def sp_pools(g: UsageGroup) -> list[Pool]:
     """Savings plan pools a usage group can be covered by, most specific first."""
     a = g.attrs
     if a["provider"] == "aws":
-        service = AWS_SERVICES.get(a["service_name"] or "")
+        service = aws_service(a["service_name"])
         out = []
         if service == "ec2" and a["instance_family"] and a["region"]:
             out.append(
@@ -170,9 +192,20 @@ def sp_pools(g: UsageGroup) -> list[Pool]:
                     measure="od",
                 )
             )
-        if service in ("ec2", "fargate", "lambda"):
+        if service in AWS_COMPUTE_SP_SERVICES:
             out.append(
                 Pool(LAYER_COMPUTE_SP, "aws", k.AWS_SP_COMPUTE, "sp", "compute", measure="od")
+            )
+        if service == "sagemaker":
+            out.append(
+                Pool(
+                    LAYER_COMPUTE_SP,
+                    "aws",
+                    k.AWS_SP_SAGEMAKER,
+                    "sp_sagemaker",
+                    "sagemaker",
+                    measure="od",
+                )
             )
         if service in AWS_DATABASE_SP_SERVICES:
             out.append(

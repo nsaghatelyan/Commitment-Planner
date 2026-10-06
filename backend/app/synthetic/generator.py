@@ -25,12 +25,15 @@ from typing import Any
 import pyarrow as pa
 
 from app.collectors import types as k
+from app.collectors.aws.usage_types import RDS_ENGINES, REGION_PREFIXES
 from app.collectors.types import (
     AccountInfo,
     CommitmentRecord,
     NativeRecommendation,
     UtilizationRecord,
 )
+from app.engine.pools import AWS_DATABASE_SP_SERVICES as DATABASE_SP_SERVICES
+from app.engine.pools import AWS_RI_SERVICES
 from app.pricing.keys import usage_sku_key
 from app.pricing.types import PriceRecord
 from app.synthetic import catalog as cat
@@ -49,6 +52,19 @@ EC2 = "Amazon Elastic Compute Cloud - Compute"
 RDS = "Amazon Relational Database Service"
 CACHE = "Amazon ElastiCache"
 FARGATE = "Amazon Elastic Container Service"
+DYNAMODB = "Amazon DynamoDB"
+DOCDB = "Amazon DocumentDB (with MongoDB compatibility)"
+LAMBDA = "AWS Lambda"
+SAGEMAKER = "Amazon SageMaker"
+_PREFIX = {region: prefix for prefix, region in REGION_PREFIXES.items()}
+_RDS_OPERATION = {engine: f"CreateDBInstance:{code}" for code, engine in RDS_ENGINES.items()}
+
+
+def _usage_type(region: str, usage: str) -> str:
+    """AWS usage type as billed: region-prefixed except in us-east-1."""
+    return usage if region == "us-east-1" else f"{_PREFIX[region]}-{usage}"
+
+
 VM = "Virtual Machines"
 
 
@@ -80,6 +96,9 @@ class Resource:
     tenancy: str | None = None
     database_engine: str | None = None
     deployment_option: str | None = None
+    # AWS billing usage type and operation (the price key for every service but EC2).
+    usage_type: str | None = None
+    operation: str | None = None
     spot: bool = False
     usage_unit: str = "Hrs"
     quantity: float = 1.0
@@ -103,6 +122,8 @@ class Resource:
             self.database_engine,
             self.deployment_option,
             self.usage_unit,
+            self.usage_type,
+            self.operation,
         )
 
 
@@ -292,6 +313,11 @@ class Builder:
                     instance_type=klass,
                     database_engine=engine,
                     deployment_option=deployment,
+                    usage_type=_usage_type(
+                        region,
+                        f"{'Multi-AZUsage' if deployment == 'Multi-AZ' else 'InstanceUsage'}:{klass}",
+                    ),
+                    operation=_RDS_OPERATION.get(engine, "CreateDBInstance:0002"),
                     sp_eligible=False,
                     tags={"app": app, "env": "prod"},
                 )
@@ -314,6 +340,8 @@ class Builder:
                     schedule=always,
                     instance_type=node_type,
                     database_engine="Redis",
+                    usage_type=_usage_type(region, f"NodeUsage:{node_type}"),
+                    operation="CreateCacheCluster:0002",
                     sp_eligible=False,
                     tags={"app": app, "env": "prod"},
                 )
@@ -334,9 +362,108 @@ class Builder:
                 schedule=schedule,
                 usage_unit="vCPU-Hours",
                 quantity=vcpus,
+                usage_type=_usage_type(region, "Fargate-vCPU-Hours:perCPU"),
+                operation="FargateTask",
                 tags={"app": app, "env": "prod"},
             )
         )
+
+    def dynamodb(self, acct, region, rcu, wcu, app="table", scale=None):
+        """Provisioned capacity: one resource per capacity type, priced per unit-hour."""
+        for usage, units, price in (
+            ("ReadCapacityUnit-Hrs", rcu, cat.DYNAMODB_RCU_HOUR),
+            ("WriteCapacityUnit-Hrs", wcu, cat.DYNAMODB_WCU_HOUR),
+        ):
+            self.resources.append(
+                Resource(
+                    provider="aws",
+                    account=acct,
+                    region=region,
+                    service_name=DYNAMODB,
+                    service_category="Databases",
+                    resource_id=f"arn:aws:dynamodb:{region}:{acct.id}:table/{app}",
+                    resource_name=app,
+                    od_hourly=units * price,
+                    units=units,
+                    schedule=always,
+                    usage_unit=usage,
+                    quantity=units,
+                    usage_type=_usage_type(region, usage),
+                    operation="CommittedThroughput",
+                    sp_eligible=False,
+                    scale=scale,
+                    tags={"app": app, "env": "prod"},
+                )
+            )
+
+    def docdb(self, acct, region, klass, n=1, app="docs", schedule=None, start=None):
+        """DocumentDB has no reservations: only Database Savings Plans can cover it."""
+        for i, sch in enumerate(self._schedules(n, schedule, None, start, None, None)):
+            name = f"{app}-{i + 1:02d}"
+            self.resources.append(
+                Resource(
+                    provider="aws",
+                    account=acct,
+                    region=region,
+                    service_name=DOCDB,
+                    service_category="Databases",
+                    resource_id=f"arn:aws:rds:{region}:{acct.id}:db:{name}",
+                    resource_name=name,
+                    od_hourly=cat.AWS_DOCDB[klass],
+                    units=cat.aws_size_factor(klass),
+                    schedule=sch,
+                    instance_type=klass,
+                    usage_type=_usage_type(region, f"InstanceUsage:{klass}"),
+                    operation="CreateDBInstance:0023",
+                    sp_eligible=False,
+                    tags={"app": app, "env": "prod"},
+                )
+            )
+
+    def lambda_fn(self, acct, region, gb_seconds_per_hour, app="fn", scale=None):
+        self.resources.append(
+            Resource(
+                provider="aws",
+                account=acct,
+                region=region,
+                service_name=LAMBDA,
+                service_category="Compute",
+                resource_id=f"arn:aws:lambda:{region}:{acct.id}:function:{app}",
+                resource_name=app,
+                od_hourly=gb_seconds_per_hour * cat.LAMBDA_GB_SECOND,
+                units=gb_seconds_per_hour,
+                schedule=always,
+                usage_unit="Lambda-GB-Second",
+                quantity=gb_seconds_per_hour,
+                usage_type=_usage_type(region, "Lambda-GB-Second"),
+                operation="Invoke",
+                scale=scale,
+                tags={"app": app, "env": "prod"},
+            )
+        )
+
+    def sagemaker(self, acct, region, itype, n=1, app="model"):
+        for i in range(n):
+            name = f"{app}-{i + 1:02d}"
+            self.resources.append(
+                Resource(
+                    provider="aws",
+                    account=acct,
+                    region=region,
+                    service_name=SAGEMAKER,
+                    service_category="Machine Learning",
+                    resource_id=f"arn:aws:sagemaker:{region}:{acct.id}:endpoint/{name}",
+                    resource_name=name,
+                    od_hourly=cat.AWS_SAGEMAKER[itype],
+                    units=1,
+                    schedule=always,
+                    instance_type=itype,
+                    usage_type=_usage_type(region, f"Host:{itype}"),
+                    operation="RunInstance",
+                    sp_eligible=False,
+                    tags={"app": app, "env": "prod"},
+                )
+            )
 
     # ---- Azure resources
     def vm(
@@ -672,6 +799,8 @@ class Builder:
                     tenancy=r.tenancy,
                     database_engine=r.database_engine,
                     deployment_option=r.deployment_option,
+                    usage_type=r.usage_type,
+                    operation=r.operation,
                     usage_unit=r.usage_unit,
                     tags=list(r.tags.items()),
                 )
@@ -956,61 +1085,33 @@ class Builder:
             od = r.od_hourly
             if r.provider == "aws":
                 service = key.split("|", 1)[0]
+
+                def offer(model, kind, term, pay, service=service, key=key, r=r, od=od):
+                    disc = cat.discount("aws", kind, term, pay)
+                    add("aws", service, key, r.region, model, od, disc, term, pay)
+
                 add("aws", service, key, r.region, "on_demand", od, 0)
-                if service in ("rds", "opensearch"):
-                    disc = cat.discount("aws", "db_sp", 12)
-                    add("aws", service, key, r.region, "sp_database", od, disc, 12, "no_upfront")
+                # What AWS sells for each service (see app.engine.pools).
+                if service in DATABASE_SP_SERVICES:
+                    offer("sp_database", "db_sp", 12, "no_upfront")
+                if service == "dynamodb":
+                    offer("ri", "dynamodb_ri", 12, "partial_upfront")
+                    continue
                 for term in (12, 36):
                     for pay in aws_payments:
                         if service == "fargate":
-                            add(
-                                "aws",
-                                service,
-                                key,
-                                r.region,
-                                "sp",
-                                od,
-                                cat.discount("aws", "fargate_sp", term, pay),
-                                term,
-                                pay,
-                            )
-                            continue
-                        if service == "ec2":
-                            add(
-                                "aws",
-                                service,
-                                key,
-                                r.region,
-                                "sp",
-                                od,
-                                cat.discount("aws", "compute_sp", term, pay),
-                                term,
-                                pay,
-                            )
-                            add(
-                                "aws",
-                                service,
-                                key,
-                                r.region,
-                                "sp_instance",
-                                od,
-                                cat.discount("aws", "ec2_sp", term, pay),
-                                term,
-                                pay,
-                            )
-                            if r.operating_system != "Linux":
-                                continue  # Windows EC2 is SP-only in this data set
-                        add(
-                            "aws",
-                            service,
-                            key,
-                            r.region,
-                            "ri",
-                            od,
-                            cat.discount("aws", "ri", term, pay),
-                            term,
-                            pay,
-                        )
+                            offer("sp", "fargate_sp", term, pay)
+                        elif service == "lambda":
+                            offer("sp", "lambda_sp", term, pay)
+                        elif service == "sagemaker":
+                            offer("sp_sagemaker", "sagemaker_sp", term, pay)
+                        elif service == "ec2":
+                            offer("sp", "compute_sp", term, pay)
+                            offer("sp_instance", "ec2_sp", term, pay)
+                            if r.operating_system == "Linux":  # Windows EC2: SP-only here
+                                offer("ri", "ri", term, pay)
+                        elif service in AWS_RI_SERVICES:
+                            offer("ri", "ri", term, pay)
             else:
                 unit = r.usage_unit
                 per_unit = od / (r.quantity or 1) if unit != "1 Hour" else od
@@ -1344,12 +1445,27 @@ def _startup(b: Builder) -> None:
     b.vm(subs[0], "eastus", "Standard_D4s_v5", 2, start=b.at(7), app="ml")
 
 
+def _data(b: Builder) -> None:
+    """Databases and serverless/ML compute, no commitments: one of each commitment type the
+    engine sizes beyond EC2 (RDS, ElastiCache and DynamoDB reservations, a Database Savings
+    Plan for DocumentDB, which has no reservations, Compute SP for Lambda, SageMaker SP)."""
+    (aws,) = accts = _aws_accounts(b, ["data"])
+    b.connections.append(SyntheticConnection("aws", "AWS", accts, payer_account_id=aws.id))
+    b.rds(aws, "us-east-1", "db.m5.large", "MySQL", app="orders")
+    b.cache(aws, "us-east-1", "cache.r6g.large", 2, app="sessions")
+    b.dynamodb(aws, "us-east-1", rcu=2000, wcu=500, app="events")
+    b.docdb(aws, "us-east-1", "db.r6g.large", 2, app="catalog")
+    b.lambda_fn(aws, "us-east-1", 200_000, app="ingest")
+    b.sagemaker(aws, "us-east-1", "ml.m5.xlarge", 2, app="ranker")
+
+
 # profile -> (builder, default days of history)
 PROFILES: dict[str, tuple[Callable[[Builder], None], int]] = {
     "small": (_small, 90),
     "medium": (_medium, 120),
     "large": (_large, 180),
     "startup": (_startup, 21),
+    "data": (_data, 120),
 }
 DEFAULT_END = date(2026, 10, 1)
 

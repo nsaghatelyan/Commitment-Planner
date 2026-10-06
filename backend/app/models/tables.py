@@ -186,7 +186,8 @@ class Price(IdMixin, Base):
     payment_option: Mapped[str | None] = mapped_column(String(32))
     unit: Mapped[str] = mapped_column(String(32), nullable=False)
     # Per unit (per hour for compute). For ri/sp, upfront is amortized into the rate.
-    price_per_unit: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    # 14 decimals: per-request and per-unit prices go down to $0.0000000016 (ElastiCache ECPU).
+    price_per_unit: Mapped[Decimal] = mapped_column(Numeric(24, 14), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
     effective_from: Mapped[date] = mapped_column(Date, nullable=False)
     attributes: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

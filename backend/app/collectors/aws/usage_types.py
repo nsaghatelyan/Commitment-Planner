@@ -10,6 +10,8 @@ REGION_PREFIXES = {
     "APS4": "ap-southeast-3", "APS5": "ap-south-2", "APS6": "ap-southeast-4",
     "APS7": "ap-southeast-5", "APE1": "ap-east-1", "MES1": "me-south-1", "MEC1": "me-central-1",
     "AFS1": "af-south-1", "ILC1": "il-central-1", "UGW1": "us-gov-west-1", "UGE1": "us-gov-east-1",
+    # eu-west-1 kept its original prefix ("EU-BoxUsage:m5.large").
+    "EU": "eu-west-1",
 }  # fmt: skip
 
 # EC2 RunInstances operation suffix -> operating system / license.

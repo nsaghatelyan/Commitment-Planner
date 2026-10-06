@@ -30,6 +30,8 @@ GROUP_COLUMNS = (
     "database_engine",
     "deployment_option",
     "usage_unit",
+    "usage_type",
+    "operation",
 )
 
 
@@ -172,6 +174,7 @@ def load_usage(
         group.sku_key = usage_sku_key(
             a["provider"], a["service_name"], a["instance_type"], a["operating_system"],
             a["tenancy"], a["database_engine"], a["deployment_option"], a["usage_unit"],
+            a["usage_type"], a["operation"],
         )  # fmt: skip
         if not group.units.any() and group.qty.any() and a["provider"] == "aws":
             factor = aws_size_factor(a["instance_type"]) if a["instance_type"] else 1

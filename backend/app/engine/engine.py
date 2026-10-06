@@ -45,7 +45,7 @@ from app.engine.pools import (
 )
 from app.engine.prices import PriceBook
 from app.engine.stats import Stability, analyze
-from app.pricing.keys import AWS_SERVICES
+from app.pricing.keys import aws_service
 
 NO_UPFRONT = {"aws": "no_upfront", "azure": None}
 
@@ -153,7 +153,7 @@ def _round_down(value: float, step: float) -> float:
 def _pool_service(c: "CommitmentInfo") -> str | None:
     """The pool service name a commitment's service corresponds to."""
     if c.provider == "aws":
-        return AWS_SERVICES.get(c.service or "", c.service)
+        return aws_service(c.service) or c.service
     if (c.service or "").replace(" ", "").lower() == "virtualmachines":
         return "Virtual Machines"
     return c.service
@@ -251,9 +251,17 @@ class Engine:
         pools: dict[Pool, list[UsageGroup]] = defaultdict(list)
         for g in self.data.groups:
             for pool in assign(g):
-                if pool is not None:
+                # A savings plan only covers usage it has a rate for: a service's storage,
+                # I/O or backup charges stay outside the commitment.
+                if pool is not None and (pool.measure != "od" or self._has_rate(pool, g)):
                     pools[pool].append(g)
         return pools
+
+    def _has_rate(self, pool: Pool, g: UsageGroup) -> bool:
+        sku = self.prices.get(pool.provider, g.sku_key, g.region)
+        return bool(
+            sku and sku.on_demand and any(m == pool.price_model for m, _, _ in sku.commitments)
+        )
 
     # ---- series and prices
     def _series(self, pool: Pool, groups: list[UsageGroup]) -> np.ndarray:
@@ -446,7 +454,8 @@ class Engine:
         if pool.measure == "od":
             return 0.0
         if pool.measure == "qty":
-            return 1.0
+            # DynamoDB reserved capacity is sold in blocks of 100 capacity units.
+            return 100.0 if pool.service == "dynamodb" else 1.0
         main = max(groups, key=lambda g: float(pool.series(g)[-len(series) :].sum()))
         return main.units_per_instance or 1.0
 
@@ -522,7 +531,7 @@ class Engine:
             payment_option=opt.payment_option,
             monthly_savings=round(opt.monthly_savings, 2),
             scope="organization"
-            if pool.kind in (k.AWS_SP_COMPUTE, k.AWS_SP_DATABASE)
+            if pool.kind in (k.AWS_SP_COMPUTE, k.AWS_SP_DATABASE, k.AWS_SP_SAGEMAKER)
             else ("Shared" if pool.provider == "azure" else "Region"),
             service=pool.service,
             region=pool.region,
@@ -647,7 +656,9 @@ class Engine:
             what = {
                 k.AWS_SP_COMPUTE: "on-demand EC2, Fargate and Lambda compute",
                 k.AWS_SP_EC2: f"on-demand {pool.family} usage in {pool.region}",
-                k.AWS_SP_DATABASE: "on-demand database usage (RDS/Aurora, OpenSearch)",
+                k.AWS_SP_DATABASE: "on-demand database usage (RDS/Aurora, DynamoDB, "
+                "ElastiCache, OpenSearch, DocumentDB, Neptune, Timestream, DMS, Keyspaces)",
+                k.AWS_SP_SAGEMAKER: "on-demand SageMaker instance usage",
                 k.AZURE_SP_COMPUTE: "on-demand Azure compute (VMs, App Service)",
             }[pool.kind]
             floor = (
@@ -903,6 +914,7 @@ class Engine:
             k.AWS_SP_EC2: 1,
             k.AWS_SP_COMPUTE: 2,
             k.AWS_SP_DATABASE: 2,
+            k.AWS_SP_SAGEMAKER: 2,
             k.AZURE_SP_COMPUTE: 2,
         }
         action = {"exchange": 0, "renew": 1, "purchase": 1}

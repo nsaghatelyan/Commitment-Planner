@@ -156,8 +156,9 @@ def _db_rate(product, usage_type, operation, rate, instance_type, description, u
     }
 
 
-def test_aws_database_savings_plan_rates():
-    """Shapes as returned by the live API (us-east-2, October 2026)."""
+def test_usage_savings_plan_rates_key_every_variant_exactly():
+    """Database Savings Plans rates, shapes as returned by the live API (us-east-2): each usage
+    type + operation gets its own key, so variants that used to collide are all priced."""
     client = boto3.client(
         "savingsplans", region_name="us-east-1", aws_access_key_id="x", aws_secret_access_key="x"
     )
@@ -165,67 +166,82 @@ def test_aws_database_savings_plan_rates():
     results = [
         _db_rate("RDS", "USE2-InstanceUsage:db.m5.large", "CreateDBInstance:0002", "0.1368",
                  "db.m5.large", "MySQL"),
-        _db_rate("RDS", "USE2-Multi-AZUsage:db.m5.large", "CreateDBInstance:0014", "0.2848",
-                 "db.m5.large", "PostgreSQL"),
-        # Same key as the plain Multi-AZ instance: dropped rather than collide.
         _db_rate("RDS", "USE2-Multi-AZClusterUsage:db.m5.large", "CreateDBInstance:0014",
                  "0.3420", "db.m5.large", "PostgreSQL"),
-        # Two editions behind one engine name: ambiguous, so skipped.
+        # SQL Server editions share an engine name but not an operation.
         _db_rate("RDS", "USE2-InstanceUsage:db.m5.large", "CreateDBInstance:0012", "0.70",
                  "db.m5.large", "SQL Server"),
         _db_rate("RDS", "USE2-InstanceUsage:db.m5.large", "CreateDBInstance:0015", "1.40",
                  "db.m5.large", "SQL Server"),
-        _db_rate("OpenSearch", "USE2-ESInstance:m7g.medium", "ESDomain", "0.0544",
-                 "m7g.medium.search", "Instance"),
-        # Valkey-only ElastiCache rates aren't keyed by engine: left out.
         _db_rate("ElastiCache", "USE2-NodeUsage:cache.m7g.large", "CreateCacheCluster:Valkey",
                  "0.10112", "cache.m7g.large", "Valkey"),
-        # Serverless units have no instance type.
         _db_rate("RDS", "USE2-Aurora:ServerlessV2Usage", "CreateDBInstance:0021", "0.096",
-                 None, "Aurora PostgreSQL", unit="ACU-Hr"),
+                 "", "Aurora PostgreSQL", unit="ACU-Hr"),
+        _db_rate("DynamoDB", "USE2-ReadCapacityUnit-Hrs", "CommittedThroughput", "0.0001144",
+                 "", "DynamoDB Provisioned Read Units", unit="ReadCapacityUnit-Hrs"),
+        # Two rates behind one usage type + operation would be a guess: skipped.
+        _db_rate("DocDB", "USE2-InstanceUsage:db.r6g.large", "CreateDBInstance:0023", "0.2",
+                 "db.r6g.large", "General"),
+        _db_rate("DocDB", "USE2-InstanceUsage:db.r6g.large", "CreateDBInstance:0023", "0.3",
+                 "db.r6g.large", "General"),
     ]  # fmt: skip
-    results[-1]["properties"] = [p for p in results[-1]["properties"] if p["value"]]
+    for r in results:
+        r["properties"] = [p for p in r["properties"] if p["value"]]
+    usage_types = ["USE2-InstanceUsage:db.m5.large", "USE2-ReadCapacityUnit-Hrs"]
     stub.add_response(
         "describe_savings_plans_offering_rates",
         {"searchResults": results},
         {
             "savingsPlanTypes": ["Database"],
-            "products": ["RDS", "OpenSearch"],
+            "products": list(aws.USAGE_SP_PLANS["Database"][0]),
             "filters": [{"name": "region", "values": ["us-east-2"]}],
             "maxResults": 1000,
+            "usageTypes": usage_types,
         },
     )
     stub.activate()
-    rates = aws.database_savings_plan_rates(
-        client, CountingCaller(CallStats()), ["us-east-2"], TODAY
+    rates = aws.usage_savings_plan_rates(
+        client, CountingCaller(CallStats()), "Database", ["us-east-2"], TODAY, usage_types
     )
     by_key = {r.sku_key: r for r in rates}
     assert set(by_key) == {
-        "rds|db.m5.large|MySQL|Single-AZ",
-        "rds|db.m5.large|PostgreSQL|Multi-AZ",
-        "opensearch|m7g.medium",
+        "rds|InstanceUsage:db.m5.large|CreateDBInstance:0002",
+        "rds|Multi-AZClusterUsage:db.m5.large|CreateDBInstance:0014",
+        "rds|InstanceUsage:db.m5.large|CreateDBInstance:0012",
+        "rds|InstanceUsage:db.m5.large|CreateDBInstance:0015",
+        "elasticache|NodeUsage:cache.m7g.large|CreateCacheCluster:Valkey",
+        "rds|Aurora:ServerlessV2Usage|CreateDBInstance:0021",
+        "dynamodb|ReadCapacityUnit-Hrs|CommittedThroughput",
     }
-    mysql = by_key["rds|db.m5.large|MySQL|Single-AZ"]
+    mysql = by_key["rds|InstanceUsage:db.m5.large|CreateDBInstance:0002"]
     assert (mysql.pricing_model, mysql.term_months, mysql.payment_option) == (
         "sp_database",
         12,
         "no_upfront",
     )
     assert mysql.price_per_unit == Decimal("0.1368") and mysql.service == "rds"
-    assert by_key["rds|db.m5.large|PostgreSQL|Multi-AZ"].price_per_unit == Decimal("0.2848")
+    rcu = by_key["dynamodb|ReadCapacityUnit-Hrs|CommittedThroughput"]
+    assert rcu.unit == "ReadCapacityUnit-Hrs" and rcu.price_per_unit == Decimal("0.0001144")
 
 
-def test_rds_prices_only_for_keyed_deployments():
-    """Aurora I/O-Optimized, Multi-AZ clusters etc. would collide with the plain instance key."""
+def test_usage_keys_match_across_usage_prices_and_rates():
+    """The same RDS instance, as Cost Explorer bills it and as the Pricing API sells it."""
+    from app.pricing.keys import usage_sku_key
+
+    usage_key = usage_sku_key(
+        "aws", "Amazon Relational Database Service", "db.r6g.large",
+        database_engine="Aurora MySQL", usage_type="USE2-InstanceUsageIOOptimized:db.r6g.large",
+        operation="CreateDBInstance:0016",
+    )  # fmt: skip
     product = {
         "product": {
             "sku": "S1",
             "attributes": {
                 "instanceType": "db.r6g.large",
                 "databaseEngine": "Aurora MySQL",
-                "deploymentOption": "Single-AZ",
                 "regionCode": "us-east-2",
                 "usagetype": "USE2-InstanceUsageIOOptimized:db.r6g.large",
+                "operation": "CreateDBInstance:0016",
             },
         },
         "terms": {
@@ -234,15 +250,69 @@ def test_rds_prices_only_for_keyed_deployments():
             }
         },
     }
-    assert aws.parse_product("AmazonRDS", product, TODAY) == []
-    product["product"]["attributes"]["usagetype"] = "USE2-InstanceUsage:db.r6g.large"
     (od,) = aws.parse_product("AmazonRDS", product, TODAY)
-    assert od.sku_key == "rds|db.r6g.large|Aurora MySQL|Single-AZ"
+    assert (
+        od.sku_key == usage_key == "rds|InstanceUsageIOOptimized:db.r6g.large|CreateDBInstance:0016"
+    )
+    # us-east-1 usage types carry no region prefix; other regions' prefixes are stripped.
+    assert usage_sku_key("aws", "AWS Lambda", None, usage_type="Lambda-GB-Second") == (
+        "lambda|Lambda-GB-Second|"
+    )
 
 
-def test_opensearch_keys_match_usage_and_prices():
-    from app.pricing.keys import aws_generic_key, usage_sku_key
+def test_tiered_on_demand_and_dynamodb_reserved_capacity():
+    """DynamoDB: a free tier before the paid one, and reserved capacity as an upfront fee plus
+    an hourly rate per capacity unit (shapes from the live Pricing API, us-east-2)."""
+    product = {
+        "product": {
+            "sku": "D1",
+            "attributes": {
+                "regionCode": "us-east-2",
+                "usagetype": "USE2-ReadCapacityUnit-Hrs",
+                "operation": "CommittedThroughput",
+            },
+        },
+        "terms": {
+            "OnDemand": {
+                "t": {
+                    "priceDimensions": {
+                        "paid": {"unit": "ReadCapacityUnit-Hrs", "beginRange": "18600",
+                                 "pricePerUnit": {"USD": "0.0001300000"}},
+                        "free": {"unit": "ReadCapacityUnit-Hrs", "beginRange": "0",
+                                 "pricePerUnit": {"USD": "0.0000000000"}},
+                    }
+                }
+            },
+            "Reserved": {
+                "r": {
+                    "termAttributes": {"LeaseContractLength": "1yr", "OfferingClass": "standard",
+                                       "PurchaseOption": "Heavy Utilization"},
+                    "priceDimensions": {
+                        "h": {"unit": "ReadCapacityUnit-Hrs", "pricePerUnit": {"USD": "0.000025"}},
+                        "u": {"unit": "Quantity", "pricePerUnit": {"USD": "0.3"}},
+                    },
+                }
+            },
+        },
+    }  # fmt: skip
+    od, ri = aws.parse_product("AmazonDynamoDB", product, TODAY)
+    key = "dynamodb|ReadCapacityUnit-Hrs|CommittedThroughput"
+    assert od.sku_key == ri.sku_key == key
+    assert od.price_per_unit == Decimal("0.0001300000")
+    assert (ri.unit, ri.term_months, ri.payment_option) == ("ReadCapacityUnit-Hrs", 12,
+                                                            "partial_upfront")  # fmt: skip
+    # $0.000025/hour + $0.30 upfront spread over the year
+    assert ri.price_per_unit == (Decimal("0.000025") + Decimal("0.3") / 8760).quantize(
+        Decimal("1e-14")
+    )
 
-    price_key = aws_generic_key("opensearch", "m7g.medium.search")
-    usage_key = usage_sku_key("aws", "Amazon OpenSearch Service", "m7g.medium")
-    assert price_key == usage_key == "opensearch|m7g.medium"
+
+def test_region_prefixes_stripped_including_eu_west_1():
+    from app.collectors.aws.usage_types import parse_usage_type
+    from app.pricing.keys import strip_region
+
+    assert strip_region("EU-Notebk:ml.m5.xlarge") == "Notebk:ml.m5.xlarge"
+    assert strip_region("USE2-InstanceUsage:db.m5.large") == "InstanceUsage:db.m5.large"
+    # us-east-1 has no prefix; usage types that merely contain a dash are left alone.
+    assert strip_region("ECS-Managed-Instances:c5.large") == "ECS-Managed-Instances:c5.large"
+    assert parse_usage_type("EU-BoxUsage:m5.large")["region"] == "eu-west-1"

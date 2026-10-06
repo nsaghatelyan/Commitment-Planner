@@ -607,7 +607,7 @@ def test_native_recommendations():
             ]
         },
     )
-    for _ in range(5):
+    for _ in range(6):
         ce.add_response("get_reservation_purchase_recommendation", {})
     c = _collector(stubs, rec_terms=("ONE_YEAR",), rec_payments=("NO_UPFRONT",))
     recs = c.collect_native_recommendations()
@@ -620,7 +620,7 @@ def test_native_recommendations():
     assert recs[0].hourly_commitment == Decimal("2.75")
     assert recs[1].hourly_commitment == Decimal("0.42")
     assert recs[2].instance_type == "m5.large" and recs[2].quantity == Decimal(6)
-    assert c.stats.calls["ce:GetReservationPurchaseRecommendation"] == 6
+    assert c.stats.calls["ce:GetReservationPurchaseRecommendation"] == 7
 
 
 def test_counting_caller_counts_misses_only(tmp_path):
@@ -661,7 +661,7 @@ def test_database_sp_recommendations_only_ask_for_offered_options():
                 "AccountScope": "PAYER",
             },
         )
-    for _ in range(6 * 4):
+    for _ in range(7 * 4):
         ce.add_response("get_reservation_purchase_recommendation", {})
     c = _collector(stubs)
     assert c.collect_native_recommendations() == []

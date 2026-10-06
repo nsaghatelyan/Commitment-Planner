@@ -27,6 +27,7 @@ RI_SERVICES = [
     "Amazon Redshift",
     # Cost Explorer's name for it; elsewhere the service is "Amazon MemoryDB".
     "Amazon MemoryDB Service",
+    "Amazon DynamoDB Service",
 ]
 
 
