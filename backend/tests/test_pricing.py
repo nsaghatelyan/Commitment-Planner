@@ -132,3 +132,117 @@ def test_os_keys():
     assert azure_key(
         "Virtual Machines", "Standard_D2s_v3", "Virtual Machines Dsv3 Series Windows"
     ).endswith("|Windows")
+
+
+def _db_rate(product, usage_type, operation, rate, instance_type, description, unit="Hrs"):
+    return {
+        "savingsPlanOffering": {
+            "offeringId": "db1",
+            "paymentOption": "No Upfront",
+            "planType": "Database",
+            "durationSeconds": 31536000,
+            "currency": "USD",
+        },
+        "rate": rate,
+        "unit": unit,
+        "productType": product,
+        "usageType": usage_type,
+        "operation": operation,
+        "properties": [
+            {"name": "region", "value": "us-east-2"},
+            {"name": "instanceType", "value": instance_type},
+            {"name": "productDescription", "value": description},
+        ],
+    }
+
+
+def test_aws_database_savings_plan_rates():
+    """Shapes as returned by the live API (us-east-2, October 2026)."""
+    client = boto3.client(
+        "savingsplans", region_name="us-east-1", aws_access_key_id="x", aws_secret_access_key="x"
+    )
+    stub = Stubber(client)
+    results = [
+        _db_rate("RDS", "USE2-InstanceUsage:db.m5.large", "CreateDBInstance:0002", "0.1368",
+                 "db.m5.large", "MySQL"),
+        _db_rate("RDS", "USE2-Multi-AZUsage:db.m5.large", "CreateDBInstance:0014", "0.2848",
+                 "db.m5.large", "PostgreSQL"),
+        # Same key as the plain Multi-AZ instance: dropped rather than collide.
+        _db_rate("RDS", "USE2-Multi-AZClusterUsage:db.m5.large", "CreateDBInstance:0014",
+                 "0.3420", "db.m5.large", "PostgreSQL"),
+        # Two editions behind one engine name: ambiguous, so skipped.
+        _db_rate("RDS", "USE2-InstanceUsage:db.m5.large", "CreateDBInstance:0012", "0.70",
+                 "db.m5.large", "SQL Server"),
+        _db_rate("RDS", "USE2-InstanceUsage:db.m5.large", "CreateDBInstance:0015", "1.40",
+                 "db.m5.large", "SQL Server"),
+        _db_rate("OpenSearch", "USE2-ESInstance:m7g.medium", "ESDomain", "0.0544",
+                 "m7g.medium.search", "Instance"),
+        # Valkey-only ElastiCache rates aren't keyed by engine: left out.
+        _db_rate("ElastiCache", "USE2-NodeUsage:cache.m7g.large", "CreateCacheCluster:Valkey",
+                 "0.10112", "cache.m7g.large", "Valkey"),
+        # Serverless units have no instance type.
+        _db_rate("RDS", "USE2-Aurora:ServerlessV2Usage", "CreateDBInstance:0021", "0.096",
+                 None, "Aurora PostgreSQL", unit="ACU-Hr"),
+    ]  # fmt: skip
+    results[-1]["properties"] = [p for p in results[-1]["properties"] if p["value"]]
+    stub.add_response(
+        "describe_savings_plans_offering_rates",
+        {"searchResults": results},
+        {
+            "savingsPlanTypes": ["Database"],
+            "products": ["RDS", "OpenSearch"],
+            "filters": [{"name": "region", "values": ["us-east-2"]}],
+            "maxResults": 1000,
+        },
+    )
+    stub.activate()
+    rates = aws.database_savings_plan_rates(
+        client, CountingCaller(CallStats()), ["us-east-2"], TODAY
+    )
+    by_key = {r.sku_key: r for r in rates}
+    assert set(by_key) == {
+        "rds|db.m5.large|MySQL|Single-AZ",
+        "rds|db.m5.large|PostgreSQL|Multi-AZ",
+        "opensearch|m7g.medium",
+    }
+    mysql = by_key["rds|db.m5.large|MySQL|Single-AZ"]
+    assert (mysql.pricing_model, mysql.term_months, mysql.payment_option) == (
+        "sp_database",
+        12,
+        "no_upfront",
+    )
+    assert mysql.price_per_unit == Decimal("0.1368") and mysql.service == "rds"
+    assert by_key["rds|db.m5.large|PostgreSQL|Multi-AZ"].price_per_unit == Decimal("0.2848")
+
+
+def test_rds_prices_only_for_keyed_deployments():
+    """Aurora I/O-Optimized, Multi-AZ clusters etc. would collide with the plain instance key."""
+    product = {
+        "product": {
+            "sku": "S1",
+            "attributes": {
+                "instanceType": "db.r6g.large",
+                "databaseEngine": "Aurora MySQL",
+                "deploymentOption": "Single-AZ",
+                "regionCode": "us-east-2",
+                "usagetype": "USE2-InstanceUsageIOOptimized:db.r6g.large",
+            },
+        },
+        "terms": {
+            "OnDemand": {
+                "t": {"priceDimensions": {"d": {"unit": "Hrs", "pricePerUnit": {"USD": "0.338"}}}}
+            }
+        },
+    }
+    assert aws.parse_product("AmazonRDS", product, TODAY) == []
+    product["product"]["attributes"]["usagetype"] = "USE2-InstanceUsage:db.r6g.large"
+    (od,) = aws.parse_product("AmazonRDS", product, TODAY)
+    assert od.sku_key == "rds|db.r6g.large|Aurora MySQL|Single-AZ"
+
+
+def test_opensearch_keys_match_usage_and_prices():
+    from app.pricing.keys import aws_generic_key, usage_sku_key
+
+    price_key = aws_generic_key("opensearch", "m7g.medium.search")
+    usage_key = usage_sku_key("aws", "Amazon OpenSearch Service", "m7g.medium")
+    assert price_key == usage_key == "opensearch|m7g.medium"

@@ -42,7 +42,11 @@ def aws_rds_key(instance_type: str, engine: str, deployment_option: str | None) 
 
 
 def aws_generic_key(service: str, instance_type: str) -> str:
-    return f"{service.lower()}|{instance_type}"
+    service = service.lower()
+    if service == "opensearch":
+        # Prices say "m7g.medium.search", usage types (ESInstance:m7g.medium) don't.
+        instance_type = instance_type.removesuffix(".search")
+    return f"{service}|{instance_type}"
 
 
 def azure_os(product_name: str | None) -> str | None:

@@ -88,6 +88,8 @@ DISCOUNTS = {
     ("aws", "ec2_sp", 12): 0.33,
     ("aws", "ec2_sp", 36): 0.55,
     ("aws", "ri", 12): 0.38,
+    # Database Savings Plans: 1-year No Upfront only, ~20% off RDS/OpenSearch on-demand.
+    ("aws", "db_sp", 12): 0.20,
     ("aws", "ri", 36): 0.58,
     ("azure", "sp", 12): 0.28,
     ("azure", "sp", 36): 0.48,

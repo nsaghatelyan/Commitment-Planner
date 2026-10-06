@@ -78,6 +78,7 @@ AWS_PRICE_SERVICES = {
     "Amazon Elastic Compute Cloud": "AmazonEC2",
     "Amazon Relational Database Service": "AmazonRDS",
     "Amazon ElastiCache": "AmazonElastiCache",
+    "Amazon OpenSearch Service": "AmazonES",
 }
 
 
@@ -126,12 +127,17 @@ def sync_prices_for_usage(session: Session, store, conn, collector) -> int:
     pricing = client("pricing", "us-east-1")
     total = 0
     ec2_by_region: dict[str, set[str]] = {}
+    db_by_region: dict[str, set[str]] = {}
     for service, region, itype in rows:
         code = AWS_PRICE_SERVICES.get(service)
         if not code:
             continue
         if code == "AmazonEC2":
             ec2_by_region.setdefault(region, set()).add(itype)
+        if code == "AmazonES" and not itype.endswith(".search"):
+            itype += ".search"  # the price APIs' name for it
+        if code in ("AmazonRDS", "AmazonES"):
+            db_by_region.setdefault(region, set()).add(itype)
         total += upsert_prices(
             session,
             aws.on_demand_and_ri_prices(
@@ -145,6 +151,15 @@ def sync_prices_for_usage(session: Session, store, conn, collector) -> int:
             session,
             aws.savings_plan_rates(
                 savingsplans, collector.call, sorted(ec2_by_region), today, instance_types=types
+            ),
+        )
+    if db_by_region:
+        savingsplans = client("savingsplans", "us-east-1")
+        types = sorted({t for ts in db_by_region.values() for t in ts})
+        total += upsert_prices(
+            session,
+            aws.database_savings_plan_rates(
+                savingsplans, collector.call, sorted(db_by_region), today, instance_types=types
             ),
         )
     return total

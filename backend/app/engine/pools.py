@@ -8,7 +8,11 @@ from app.collectors import types as k
 from app.engine.data import UsageGroup
 from app.pricing.keys import AWS_SERVICES
 
+# LAYER_COMPUTE_SP holds the account-wide, region-flexible plans: Compute Savings Plans and
+# Database Savings Plans (they cover disjoint services, so they share the last layer).
 LAYER_RI, LAYER_INSTANCE_SP, LAYER_COMPUTE_SP = 1, 2, 3
+# Usage Database Savings Plans cover that the engine prices (see app.pricing.aws).
+AWS_DATABASE_SP_SERVICES = ("rds", "opensearch")
 
 # RDS engines whose reservations are not size-flexible (license included).
 RDS_EXACT_ENGINES = ("SQL Server", "Oracle SE1 (LI)", "Oracle SE2 (LI)", "Oracle SE (LI)")
@@ -169,6 +173,17 @@ def sp_pools(g: UsageGroup) -> list[Pool]:
         if service in ("ec2", "fargate", "lambda"):
             out.append(
                 Pool(LAYER_COMPUTE_SP, "aws", k.AWS_SP_COMPUTE, "sp", "compute", measure="od")
+            )
+        if service in AWS_DATABASE_SP_SERVICES:
+            out.append(
+                Pool(
+                    LAYER_COMPUTE_SP,
+                    "aws",
+                    k.AWS_SP_DATABASE,
+                    "sp_database",
+                    "database",
+                    measure="od",
+                )
             )
         return out
     if a["service_name"] in AZURE_SP_SERVICES:

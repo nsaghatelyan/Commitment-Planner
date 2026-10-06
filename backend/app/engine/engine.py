@@ -522,7 +522,7 @@ class Engine:
             payment_option=opt.payment_option,
             monthly_savings=round(opt.monthly_savings, 2),
             scope="organization"
-            if pool.kind == k.AWS_SP_COMPUTE
+            if pool.kind in (k.AWS_SP_COMPUTE, k.AWS_SP_DATABASE)
             else ("Shared" if pool.provider == "azure" else "Region"),
             service=pool.service,
             region=pool.region,
@@ -647,6 +647,7 @@ class Engine:
             what = {
                 k.AWS_SP_COMPUTE: "on-demand EC2, Fargate and Lambda compute",
                 k.AWS_SP_EC2: f"on-demand {pool.family} usage in {pool.region}",
+                k.AWS_SP_DATABASE: "on-demand database usage (RDS/Aurora, OpenSearch)",
                 k.AZURE_SP_COMPUTE: "on-demand Azure compute (VMs, App Service)",
             }[pool.kind]
             floor = (
@@ -901,6 +902,7 @@ class Engine:
             k.AZURE_RI: 0,
             k.AWS_SP_EC2: 1,
             k.AWS_SP_COMPUTE: 2,
+            k.AWS_SP_DATABASE: 2,
             k.AZURE_SP_COMPUTE: 2,
         }
         action = {"exchange": 0, "renew": 1, "purchase": 1}

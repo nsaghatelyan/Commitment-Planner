@@ -158,7 +158,9 @@ def _describe(r: EngineRecommendation) -> str:
     else:
         what = f"{r.quantity:g} × {r.instance_type or r.instance_family} ({KIND_LABELS.get(r.kind, r.kind)})"
     service = SERVICE_LABELS.get(r.service or "", r.service)
-    where = ", ".join(x for x in (service, r.region) if x and r.service != "compute")
+    where = ", ".join(
+        x for x in (service, r.region) if x and r.service not in ("compute", "database")
+    )
     return f"{action} {what}{' — ' + where if where else ''}"
 
 

@@ -557,8 +557,31 @@ def test_native_recommendations():
             "AccountScope": "PAYER",
         },
     )
-    ce.add_response("get_savings_plans_purchase_recommendation", {})
-    ce.add_response("get_savings_plans_purchase_recommendation", {})
+    ce.add_response("get_savings_plans_purchase_recommendation", {})  # EC2 Instance
+    ce.add_response("get_savings_plans_purchase_recommendation", {})  # SageMaker
+    ce.add_response(
+        "get_savings_plans_purchase_recommendation",
+        {
+            "SavingsPlansPurchaseRecommendation": {
+                "SavingsPlansPurchaseRecommendationDetails": [
+                    {
+                        "SavingsPlansDetails": {"OfferingId": "o2"},
+                        "AccountId": "111111111111",
+                        "UpfrontCost": "0",
+                        "EstimatedMonthlySavingsAmount": "61.3",
+                        "HourlyCommitmentToPurchase": "0.42",
+                    }
+                ]
+            }
+        },
+        {
+            "SavingsPlansType": "DATABASE_SP",
+            "TermInYears": "ONE_YEAR",
+            "PaymentOption": "NO_UPFRONT",
+            "LookbackPeriodInDays": "THIRTY_DAYS",
+            "AccountScope": "PAYER",
+        },
+    )
     ce.add_response(
         "get_reservation_purchase_recommendation",
         {
@@ -591,10 +614,12 @@ def test_native_recommendations():
     stubs.assert_done()
     assert [(r.kind, r.term_months, r.payment_option) for r in recs] == [
         ("aws_sp_compute", 12, "no_upfront"),
+        ("aws_sp_database", 12, "no_upfront"),
         ("aws_ri", 12, "no_upfront"),
     ]
     assert recs[0].hourly_commitment == Decimal("2.75")
-    assert recs[1].instance_type == "m5.large" and recs[1].quantity == Decimal(6)
+    assert recs[1].hourly_commitment == Decimal("0.42")
+    assert recs[2].instance_type == "m5.large" and recs[2].quantity == Decimal(6)
     assert c.stats.calls["ce:GetReservationPurchaseRecommendation"] == 6
 
 
@@ -604,3 +629,41 @@ def test_counting_caller_counts_misses_only(tmp_path):
     assert call("x:Op", lambda **kw: {"n": kw["n"]}, cache_key={"n": 1}, n=1) == {"n": 1}
     assert call("x:Op", lambda **kw: {"n": 2}, cache_key={"n": 1}, n=1) == {"n": 1}
     assert stats.calls == {"x:Op": 1} and stats.cache_hits == 1
+
+
+def test_database_sp_recommendations_only_ask_for_offered_options():
+    """Database Savings Plans are 1-year No Upfront only; other combinations aren't requested."""
+    stubs = Stubs()
+    ce = stubs.stub("ce")
+    for sp_type, term, payment in [
+        ("COMPUTE_SP", "ONE_YEAR", "NO_UPFRONT"),
+        ("COMPUTE_SP", "ONE_YEAR", "ALL_UPFRONT"),
+        ("COMPUTE_SP", "THREE_YEARS", "NO_UPFRONT"),
+        ("COMPUTE_SP", "THREE_YEARS", "ALL_UPFRONT"),
+        ("EC2_INSTANCE_SP", "ONE_YEAR", "NO_UPFRONT"),
+        ("EC2_INSTANCE_SP", "ONE_YEAR", "ALL_UPFRONT"),
+        ("EC2_INSTANCE_SP", "THREE_YEARS", "NO_UPFRONT"),
+        ("EC2_INSTANCE_SP", "THREE_YEARS", "ALL_UPFRONT"),
+        ("SAGEMAKER_SP", "ONE_YEAR", "NO_UPFRONT"),
+        ("SAGEMAKER_SP", "ONE_YEAR", "ALL_UPFRONT"),
+        ("SAGEMAKER_SP", "THREE_YEARS", "NO_UPFRONT"),
+        ("SAGEMAKER_SP", "THREE_YEARS", "ALL_UPFRONT"),
+        ("DATABASE_SP", "ONE_YEAR", "NO_UPFRONT"),
+    ]:
+        ce.add_response(
+            "get_savings_plans_purchase_recommendation",
+            {},
+            {
+                "SavingsPlansType": sp_type,
+                "TermInYears": term,
+                "PaymentOption": payment,
+                "LookbackPeriodInDays": "THIRTY_DAYS",
+                "AccountScope": "PAYER",
+            },
+        )
+    for _ in range(6 * 4):
+        ce.add_response("get_reservation_purchase_recommendation", {})
+    c = _collector(stubs)
+    assert c.collect_native_recommendations() == []
+    stubs.assert_done()
+    assert c.stats.calls["ce:GetSavingsPlansPurchaseRecommendation"] == 13

@@ -77,6 +77,9 @@ def _refresh_prices(aws_regions: list[str], azure_regions: list[str]) -> dict[st
         counts["aws_sp"] = upsert_prices(
             session, aws.savings_plan_rates(savingsplans, call, aws_regions, today)
         )
+        counts["aws_sp_database"] = upsert_prices(
+            session, aws.database_savings_plan_rates(savingsplans, call, aws_regions, today)
+        )
         counts["azure"] = upsert_prices(
             session, azure.retail_prices(AzureHttp(None), call, azure_regions, today=today)
         )

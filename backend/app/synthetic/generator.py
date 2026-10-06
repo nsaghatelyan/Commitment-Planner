@@ -957,6 +957,9 @@ class Builder:
             if r.provider == "aws":
                 service = key.split("|", 1)[0]
                 add("aws", service, key, r.region, "on_demand", od, 0)
+                if service in ("rds", "opensearch"):
+                    disc = cat.discount("aws", "db_sp", 12)
+                    add("aws", service, key, r.region, "sp_database", od, disc, 12, "no_upfront")
                 for term in (12, 36):
                     for pay in aws_payments:
                         if service == "fargate":

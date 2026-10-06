@@ -385,3 +385,34 @@ def test_small_savings_are_held_back_and_reported(runs):
     # A tiny share of spend lowers the bar to the absolute floor.
     lowered = run(EngineConfig(min_monthly_savings=1000.0, min_savings_share=1e-9))
     assert lowered.summary["savings_floor_monthly"] == 1.0
+
+
+def test_database_savings_plan_covers_database_usage_reservations_do_not(runs):
+    """With RDS reservations on offer they take the steady usage first; without them, a
+    Database Savings Plan (1-year No Upfront, account-wide) covers it."""
+    from app.engine.config import EngineConfig
+    from app.services.analysis import analyze
+    from app.synthetic.analysis import commitment_infos, price_rows
+
+    tenant, a, store = runs["small"]
+    assert recs(a, kind="aws_ri", service="rds")
+    assert not recs(a, kind="aws_sp_database")
+    assert pool_report(a, "aws_sp_database").skipped == "no uncovered usage"
+
+    no_rds_ri = [
+        p for p in price_rows(tenant) if not (p["service"] == "rds" and p["pricing_model"] == "ri")
+    ]
+    b = analyze(
+        store, tenant.tenant_id, commitment_infos(tenant), no_rds_ri, EngineConfig(),
+        as_of=tenant.end, native=[],
+    )  # fmt: skip
+    assert not recs(b, kind="aws_ri", service="rds")
+    (db,) = recs(b, kind="aws_sp_database")
+    assert (db.term_months, db.payment_option, db.scope) == (12, "no_upfront", "organization")
+    assert db.hourly_commitment > 0 and db.monthly_savings > 0
+    assert db.expected_utilization_pct >= TARGETS["balanced"]
+    # The plan saves less than the reservations did: ~20% off vs ~38%.
+    rds_ri_savings = sum(r.monthly_savings for r in recs(a, kind="aws_ri", service="rds"))
+    assert db.monthly_savings < rds_ri_savings
+    plan = {p["description"] for p in b.summary["purchase_plan"]}
+    assert any("Database Savings Plan" in d for d in plan)
