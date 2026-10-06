@@ -71,7 +71,26 @@ export function shortDate(iso: string) {
 }
 
 export function serviceLabel(service: string | null) {
-  const map: Record<string, string> = { ec2: "EC2", rds: "RDS", elasticache: "ElastiCache", compute: "Compute" };
+  const map: Record<string, string> = {
+    ec2: "EC2",
+    rds: "RDS",
+    elasticache: "ElastiCache",
+    opensearch: "OpenSearch",
+    redshift: "Redshift",
+    memorydb: "MemoryDB",
+    dynamodb: "DynamoDB",
+    docdb: "DocumentDB",
+    neptune: "Neptune",
+    timestream: "Timestream",
+    dms: "DMS",
+    keyspaces: "Keyspaces",
+    dsql: "Aurora DSQL",
+    fargate: "Fargate",
+    lambda: "Lambda",
+    sagemaker: "SageMaker",
+    compute: "Compute",
+    database: "Databases",
+  };
   return service ? map[service] ?? service : "—";
 }
 

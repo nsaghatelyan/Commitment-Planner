@@ -385,3 +385,145 @@ def test_small_savings_are_held_back_and_reported(runs):
     # A tiny share of spend lowers the bar to the absolute floor.
     lowered = run(EngineConfig(min_monthly_savings=1000.0, min_savings_share=1e-9))
     assert lowered.summary["savings_floor_monthly"] == 1.0
+
+
+def test_database_savings_plan_covers_database_usage_reservations_do_not(runs):
+    """With RDS reservations on offer they take the steady usage first; without them, a
+    Database Savings Plan (1-year No Upfront, account-wide) covers it."""
+    from app.engine.config import EngineConfig
+    from app.services.analysis import analyze
+    from app.synthetic.analysis import commitment_infos, price_rows
+
+    tenant, a, store = runs["small"]
+    assert recs(a, kind="aws_ri", service="rds")
+    assert not recs(a, kind="aws_sp_database")
+    assert pool_report(a, "aws_sp_database").skipped == "no uncovered usage"
+
+    no_rds_ri = [
+        p for p in price_rows(tenant) if not (p["service"] == "rds" and p["pricing_model"] == "ri")
+    ]
+    b = analyze(
+        store, tenant.tenant_id, commitment_infos(tenant), no_rds_ri, EngineConfig(),
+        as_of=tenant.end, native=[],
+    )  # fmt: skip
+    assert not recs(b, kind="aws_ri", service="rds")
+    (db,) = recs(b, kind="aws_sp_database")
+    assert (db.term_months, db.payment_option, db.scope) == (12, "no_upfront", "organization")
+    assert db.hourly_commitment > 0 and db.monthly_savings > 0
+    assert db.expected_utilization_pct >= TARGETS["balanced"]
+    # The plan saves less than the reservations did: ~20% off vs ~38%.
+    rds_ri_savings = sum(r.monthly_savings for r in recs(a, kind="aws_ri", service="rds"))
+    assert db.monthly_savings < rds_ri_savings
+    plan = {p["description"] for p in b.summary["purchase_plan"]}
+    assert any("Database Savings Plan" in d for d in plan)
+
+
+@pytest.fixture(scope="module")
+def data_run(tmp_path_factory):
+    tenant = generate("data")
+    store = UsageStore(str(tmp_path_factory.mktemp("data")))
+    return tenant, analyze_synthetic(tenant, store), store
+
+
+def test_every_database_and_serverless_commitment_type(data_run):
+    """Databases and serverless/ML compute each get the commitment AWS sells for them."""
+    _, a, _ = data_run
+    by = {(r.kind, r.service, r.instance_type): r for r in a.result.recommendations}
+
+    # Reservations for steady database usage, including DynamoDB capacity in 100-unit blocks.
+    rcu = by[("aws_ri", "dynamodb", "read capacity units")]
+    wcu = by[("aws_ri", "dynamodb", "write capacity units")]
+    assert (rcu.quantity, wcu.quantity) == (2000, 500)
+    assert (rcu.term_months, rcu.payment_option) == (12, "partial_upfront")
+    assert by[("aws_ri", "elasticache", "cache.r6g.large")].quantity == 2
+    assert by[("aws_ri", "rds", "db.m5.large")].quantity == 1
+
+    # DocumentDB has no reservations: a Database Savings Plan sized on it alone (the RDS,
+    # ElastiCache and DynamoDB usage is already reserved), at its on-demand rate less 20%.
+    (db_sp,) = recs(a, kind="aws_sp_database")
+    assert (db_sp.term_months, db_sp.payment_option) == (12, "no_upfront")
+    assert db_sp.hourly_commitment == pytest.approx(2 * 0.277 * 0.8, abs=0.002)
+
+    # Lambda through a Compute Savings Plan; SageMaker through its own plan.
+    (compute,) = recs(a, kind="aws_sp_compute")
+    assert compute.hourly_commitment == pytest.approx(200_000 * 0.0000166667 * 0.88, abs=0.002)
+    (sagemaker,) = recs(a, kind="aws_sp_sagemaker")
+    assert sagemaker.hourly_commitment == pytest.approx(2 * 0.23 * 0.73, abs=0.002)
+    for r in (db_sp, compute, sagemaker):
+        assert r.scope == "organization" and r.expected_utilization_pct == 100
+
+    plan = [p["description"] for p in a.summary["purchase_plan"]]
+    assert "Buy 2000 × read capacity units (reserved) — DynamoDB, us-east-1" in plan
+    assert "Buy $0.443/hour Database Savings Plan" in plan
+
+
+def test_savings_plans_only_cover_usage_they_have_a_rate_for(data_run):
+    """Usage a plan has no rate for (here: DocumentDB with its rates removed) is left out of the
+    plan instead of inflating the commitment."""
+    from app.engine.config import EngineConfig
+    from app.services.analysis import analyze
+    from app.synthetic.analysis import commitment_infos, price_rows
+
+    tenant, a, store = data_run
+    rows = [p for p in price_rows(tenant)
+            if not (p["service"] == "docdb" and p["pricing_model"] == "sp_database")]  # fmt: skip
+    b = analyze(
+        store, tenant.tenant_id, commitment_infos(tenant), rows, EngineConfig(),
+        as_of=tenant.end, native=[],
+    )  # fmt: skip
+    assert not recs(b, kind="aws_sp_database")
+    # The rest of the plan is unchanged.
+    assert len(recs(b, kind="aws_ri")) == len(recs(a, kind="aws_ri"))
+    assert recs(b, kind="aws_sp_compute")[0].hourly_commitment == pytest.approx(
+        recs(a, kind="aws_sp_compute")[0].hourly_commitment
+    )
+
+
+@pytest.mark.parametrize(
+    "service_name, usage_type, itype, ri, sp",
+    [
+        ("Amazon Relational Database Service", "USE2-InstanceUsage:db.m5.large", "db.m5.large",
+         "aws_ri", {"aws_sp_database"}),
+        ("Amazon ElastiCache", "USE2-NodeUsage:cache.m7g.large", "cache.m7g.large", "aws_ri",
+         {"aws_sp_database"}),
+        ("Amazon OpenSearch Service", "USE2-ESInstance:m7g.medium", "m7g.medium", "aws_ri",
+         {"aws_sp_database"}),
+        ("Amazon Redshift", "USE2-Node:ra3.xlplus", "ra3.xlplus", "aws_ri", set()),
+        ("Amazon Redshift", "USE2-Redshift:ServerlessUsage", None, "aws_ri", set()),
+        ("Amazon MemoryDB", "USE2-NodeUsage:db.r7g.large", "db.r7g.large", "aws_ri", set()),
+        ("Amazon DynamoDB", "USE2-ReadCapacityUnit-Hrs", None, "aws_ri", {"aws_sp_database"}),
+        # Replicated / on-demand DynamoDB throughput: Database Savings Plans only.
+        ("Amazon DynamoDB", "USE2-ReplWriteCapacityUnit-Hrs", None, None, {"aws_sp_database"}),
+        ("Amazon DynamoDB", "USE2-ReadRequestUnits", None, None, {"aws_sp_database"}),
+        # No reservations exist for these: Database Savings Plans only.
+        ("Amazon DocumentDB (with MongoDB compatibility)", "USE2-InstanceUsage:db.r6g.large",
+         "db.r6g.large", None, {"aws_sp_database"}),
+        ("Amazon Neptune", "USE2-InstanceUsage:db.r6g.large", "db.r6g.large", None,
+         {"aws_sp_database"}),
+        ("Amazon Timestream", "USE2-MultiAZUsage-Db.influx.xlarge", None, None,
+         {"aws_sp_database"}),
+        ("AWS Database Migration Service", "USE2-Multi-AZUsg:dms.c7i.8xlarge", "dms.c7i.8xlarge",
+         None, {"aws_sp_database"}),
+        ("Amazon Keyspaces (for Apache Cassandra)", "USE2-ReadRequestUnits", None, None,
+         {"aws_sp_database"}),
+        ("Amazon Aurora DSQL", "USE2-DSQL-DistributedProcessingUnits", None, None,
+         {"aws_sp_database"}),
+        ("Amazon Elastic Container Service", "USE2-Fargate-vCPU-Hours:perCPU", None, None,
+         {"aws_sp_compute"}),
+        ("AWS Lambda", "USE2-Lambda-GB-Second", None, None, {"aws_sp_compute"}),
+        ("Amazon SageMaker AI", "USE2-Host:ml.m5.xlarge", "ml.m5.xlarge", None,
+         {"aws_sp_sagemaker"}),
+    ],
+)  # fmt: skip
+def test_pools_per_service(service_name, usage_type, itype, ri, sp):
+    from app.engine.data import GROUP_COLUMNS, UsageGroup
+    from app.engine.pools import ri_pool, sp_pools
+
+    attrs = dict.fromkeys(GROUP_COLUMNS)
+    attrs.update(provider="aws", service_name=service_name, region="us-east-2",
+                 instance_type=itype, instance_family=itype and itype.rsplit(".", 1)[0],
+                 usage_type=usage_type)  # fmt: skip
+    g = UsageGroup(attrs, "od", None, np.zeros(1), np.zeros(1), np.zeros(1))
+    pool = ri_pool(g)
+    assert (pool.kind if pool else None) == ri
+    assert {p.kind for p in sp_pools(g)} == sp

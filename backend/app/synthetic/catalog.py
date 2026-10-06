@@ -41,6 +41,12 @@ AWS_RDS_EXACT_ENGINES = {"SQL Server SE", "SQL Server EE", "SQL Server Web", "Or
 
 AWS_CACHE = {"cache.r6g.large": 0.206}
 FARGATE_VCPU_HOUR = 0.04048
+# Services billed per unit rather than per instance-hour ($ per unit).
+DYNAMODB_RCU_HOUR = 0.00013
+DYNAMODB_WCU_HOUR = 0.00065
+LAMBDA_GB_SECOND = 0.0000166667
+AWS_DOCDB = {"db.r6g.large": 0.277}
+AWS_SAGEMAKER = {"ml.m5.xlarge": 0.23}
 
 AZURE_VM = {
     "Standard_B2s": (2, 0.0416),
@@ -88,6 +94,14 @@ DISCOUNTS = {
     ("aws", "ec2_sp", 12): 0.33,
     ("aws", "ec2_sp", 36): 0.55,
     ("aws", "ri", 12): 0.38,
+    # Database Savings Plans: 1-year No Upfront only, ~20% off on-demand.
+    ("aws", "db_sp", 12): 0.20,
+    # DynamoDB reserved capacity: 1 year, upfront fee + hourly (~54% off).
+    ("aws", "dynamodb_ri", 12): 0.54,
+    ("aws", "lambda_sp", 12): 0.12,
+    ("aws", "lambda_sp", 36): 0.17,
+    ("aws", "sagemaker_sp", 12): 0.27,
+    ("aws", "sagemaker_sp", 36): 0.46,
     ("aws", "ri", 36): 0.58,
     ("azure", "sp", 12): 0.28,
     ("azure", "sp", 36): 0.48,

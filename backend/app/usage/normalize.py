@@ -96,6 +96,8 @@ def normalize_focus(table: pa.Table, provider: str) -> pa.Table:
         {c.text("ServiceCategory")} AS service_category,
         {c.text("ServiceName")} AS service_name,
         {c.text("SkuId")} AS sku_id,
+        {c.text("x_UsageType")} AS usage_type,
+        {c.text("x_Operation")} AS operation,
         {c.text("ResourceId")} AS resource_id,
         {c.text("ResourceName")} AS resource_name,
         NULL AS instance_family,
@@ -161,6 +163,8 @@ def normalize_cur2(table: pa.Table) -> pa.Table:
             {prod("product_product_family", "product_family")} AS service_category,
             {c.text("line_item_product_code", "product_servicecode")} AS service_name,
             {c.text("product_sku")} AS sku_id,
+            {usage_type} AS usage_type,
+            {c.text("line_item_operation")} AS operation,
             {c.text("line_item_resource_id")} AS resource_id,
             {prod("product_instance_family", "instance_family")} AS instance_family,
             {prod("product_instance_type", "instance_type")} AS instance_type,
@@ -193,7 +197,7 @@ def normalize_cur2(table: pa.Table) -> pa.Table:
     common = """
         charge_period_start, charge_period_end, 'aws' AS provider, billing_account_id,
         sub_account_id, sub_account_name, region, service_category, service_name, sku_id,
-        resource_id, NULL AS resource_name, instance_family, instance_type, operating_system,
+        usage_type, operation, resource_id, NULL AS resource_name, instance_family, instance_type, operating_system,
         tenancy, database_engine, deployment_option
     """
     sql = f"""{base}

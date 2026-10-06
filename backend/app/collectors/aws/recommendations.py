@@ -10,7 +10,15 @@ from app.usage.normalize import instance_family
 
 TERMS = {"ONE_YEAR": 12, "THREE_YEARS": 36}
 LOOKBACK = {"SEVEN_DAYS": 7, "THIRTY_DAYS": 30, "SIXTY_DAYS": 60}
-SP_TYPES = {"COMPUTE_SP": "Compute", "EC2_INSTANCE_SP": "EC2Instance", "SAGEMAKER_SP": "SageMaker"}
+SP_TYPES = {
+    "COMPUTE_SP": "Compute",
+    "EC2_INSTANCE_SP": "EC2Instance",
+    "SAGEMAKER_SP": "SageMaker",
+    "DATABASE_SP": "Database",
+}
+# Database Savings Plans are sold only as 1-year No Upfront; other combinations would be
+# rejected (and each Cost Explorer call is billed).
+SP_TYPE_OPTIONS = {"DATABASE_SP": ({"ONE_YEAR"}, {"NO_UPFRONT"})}
 RI_SERVICES = [
     "Amazon Elastic Compute Cloud - Compute",
     "Amazon Relational Database Service",
@@ -19,6 +27,7 @@ RI_SERVICES = [
     "Amazon Redshift",
     # Cost Explorer's name for it; elsewhere the service is "Amazon MemoryDB".
     "Amazon MemoryDB Service",
+    "Amazon DynamoDB Service",
 ]
 
 
@@ -35,8 +44,13 @@ def savings_plan_recommendations(
 ) -> list[NativeRecommendation]:
     out = []
     for sp_type, kind_key in SP_TYPES.items():
+        allowed_terms, allowed_payments = SP_TYPE_OPTIONS.get(sp_type, (None, None))
         for term in terms:
+            if allowed_terms is not None and term not in allowed_terms:
+                continue
             for payment in payments:
+                if allowed_payments is not None and payment not in allowed_payments:
+                    continue
                 kwargs = {
                     "SavingsPlansType": sp_type,
                     "TermInYears": term,

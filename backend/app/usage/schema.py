@@ -54,6 +54,10 @@ USAGE_SCHEMA = pa.schema(
         pa.field("service_category", pa.string()),
         pa.field("service_name", pa.string()),
         pa.field("sku_id", pa.string()),
+        # AWS usage type and operation ("USE2-InstanceUsage:db.m5.large",
+        # "CreateDBInstance:0002"): the exact join key into AWS prices for non-EC2 services.
+        pa.field("usage_type", pa.string()),
+        pa.field("operation", pa.string()),
         pa.field("resource_id", pa.string()),
         pa.field("resource_name", pa.string()),
         pa.field("instance_family", pa.string()),

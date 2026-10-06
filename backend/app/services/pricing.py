@@ -1,10 +1,12 @@
 """Upsert public prices into the shared price table."""
 
+from collections import defaultdict
 from collections.abc import Iterable
 
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.engine.pools import AWS_DATABASE_SP_SERVICES as DATABASE_SP_SERVICES
 from app.models import Price
 from app.pricing.types import PriceRecord
 
@@ -73,16 +75,9 @@ def _flush(session: Session, batch: list[dict]) -> int:
     return len(unique)
 
 
-AWS_PRICE_SERVICES = {
-    "Amazon Elastic Compute Cloud - Compute": "AmazonEC2",
-    "Amazon Elastic Compute Cloud": "AmazonEC2",
-    "Amazon Relational Database Service": "AmazonRDS",
-    "Amazon ElastiCache": "AmazonElastiCache",
-}
-
-
 def sync_prices_for_usage(session: Session, store, conn, collector) -> int:
-    """Fetch public prices only for the (region, instance type) pairs this connection uses.
+    """Fetch public prices only for what this connection uses: EC2 by instance type, every
+    other AWS service by the exact usage types it was billed under.
 
     AWS uses the collector's own session (profile or default credentials; the Pricing and
     Savings Plans rate APIs are free). Azure uses the public Retail Prices API."""
@@ -92,28 +87,35 @@ def sync_prices_for_usage(session: Session, store, conn, collector) -> int:
 
     today = utc_today()
     con = connect(store, str(conn.tenant_id))
-    rows = con.execute(
-        """SELECT DISTINCT service_name, region, instance_type FROM usage
-           WHERE provider = ? AND instance_type IS NOT NULL AND region IS NOT NULL""",
-        [conn.provider],
-    ).fetchall()
-    if not rows:
-        return 0
     if conn.provider == "azure":
         from app.collectors.azure.http import AzureHttp
         from app.pricing.azure import parse_item, retail_items
 
+        rows = con.execute(
+            """SELECT DISTINCT region, instance_type FROM usage
+               WHERE provider = 'azure' AND instance_type IS NOT NULL AND region IS NOT NULL"""
+        ).fetchall()
         call = CountingCaller(collector.stats)
         http = AzureHttp(None)
         records = []
-        for service, region, sku in rows:
+        for region, sku in rows:
             odata = f"armRegionName eq '{region}' and armSkuName eq '{sku}'"
             for item in retail_items(http, call, odata):
                 records += parse_item(item, today)
         return upsert_prices(session, records)
 
     from app.pricing import aws
+    from app.pricing.keys import AWS_SERVICE_CODES, aws_service
 
+    has_usage_type = "usage_type" in {d[0] for d in con.execute("DESCRIBE usage").fetchall()}
+    rows = con.execute(
+        f"""SELECT DISTINCT service_name, region, instance_type,
+                   {"usage_type" if has_usage_type else "NULL"} AS usage_type
+            FROM usage
+            WHERE provider = 'aws' AND region IS NOT NULL AND charge_category = 'Usage'"""
+    ).fetchall()
+    if not rows:
+        return 0
     if getattr(collector, "role_arn", None):
         # Client roles don't grant pricing:GetProducts; public prices use the tool's own
         # credentials.
@@ -124,22 +126,39 @@ def sync_prices_for_usage(session: Session, store, conn, collector) -> int:
     else:
         client = collector.client
     pricing = client("pricing", "us-east-1")
+    savingsplans = client("savingsplans", "us-east-1")
+    plan_of = {s: "Database" for s in DATABASE_SP_SERVICES}
+    plan_of.update(fargate="Compute", sagemaker="SageMaker", **{"lambda": "Compute"})
     total = 0
-    ec2_by_region: dict[str, set[str]] = {}
-    for service, region, itype in rows:
-        code = AWS_PRICE_SERVICES.get(service)
-        if not code:
+    ec2_by_region: dict[str, set[str]] = defaultdict(set)
+    by_plan: dict[str, tuple[set[str], set[str]]] = defaultdict(lambda: (set(), set()))
+    for service_name, region, itype, usage_type in rows:
+        service = aws_service(service_name)
+        if service == "ec2" and itype:
+            if itype not in ec2_by_region[region]:
+                ec2_by_region[region].add(itype)
+                total += upsert_prices(
+                    session,
+                    aws.on_demand_and_ri_prices(
+                        pricing, collector.call, "AmazonEC2", [region], today,
+                        {"instanceType": itype},
+                    ),
+                )  # fmt: skip
             continue
-        if code == "AmazonEC2":
-            ec2_by_region.setdefault(region, set()).add(itype)
+        if not service or service == "ec2" or not usage_type:
+            continue
         total += upsert_prices(
             session,
             aws.on_demand_and_ri_prices(
-                pricing, collector.call, code, [region], today, {"instanceType": itype}
+                pricing, collector.call, AWS_SERVICE_CODES[service], [region], today,
+                {"usagetype": usage_type},
             ),
-        )
+        )  # fmt: skip
+        if service in plan_of:
+            regions, usage_types = by_plan[plan_of[service]]
+            regions.add(region)
+            usage_types.add(usage_type)
     if ec2_by_region:
-        savingsplans = client("savingsplans", "us-east-1")
         types = sorted({t for ts in ec2_by_region.values() for t in ts})
         total += upsert_prices(
             session,
@@ -147,4 +166,12 @@ def sync_prices_for_usage(session: Session, store, conn, collector) -> int:
                 savingsplans, collector.call, sorted(ec2_by_region), today, instance_types=types
             ),
         )
+    for plan_type, (regions, usage_types) in by_plan.items():
+        total += upsert_prices(
+            session,
+            aws.usage_savings_plan_rates(
+                savingsplans, collector.call, plan_type, sorted(regions), today,
+                usage_types=sorted(usage_types),
+            ),
+        )  # fmt: skip
     return total

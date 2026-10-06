@@ -31,6 +31,7 @@ ELIGIBLE_SERVICES = [
     "Azure Database for PostgreSQL",
     "Azure Database for MySQL",
     "Azure Cache for Redis",
+    "Redis Cache",
     "Functions",
     "Azure Container Apps",
     "Azure Dedicated Host",
@@ -148,7 +149,15 @@ KIND_LABELS = {
     k.AZURE_RI: "Azure reservation",
 }
 ACTION_LABELS = {"purchase": "Buy", "renew": "Renew", "exchange": "Exchange into"}
-SERVICE_LABELS = {"ec2": "EC2", "rds": "RDS", "elasticache": "ElastiCache"}
+SERVICE_LABELS = {
+    "ec2": "EC2", "rds": "RDS", "elasticache": "ElastiCache", "opensearch": "OpenSearch",
+    "redshift": "Redshift", "memorydb": "MemoryDB", "dynamodb": "DynamoDB",
+    "docdb": "DocumentDB", "neptune": "Neptune", "timestream": "Timestream", "dms": "DMS",
+    "keyspaces": "Keyspaces", "dsql": "Aurora DSQL", "fargate": "Fargate", "lambda": "Lambda",
+    "sagemaker": "SageMaker",
+}  # fmt: skip
+# Account-wide savings plans: no service or region to name.
+ACCOUNT_WIDE_POOLS = ("compute", "database", "sagemaker")
 
 
 def _describe(r: EngineRecommendation) -> str:
@@ -158,7 +167,7 @@ def _describe(r: EngineRecommendation) -> str:
     else:
         what = f"{r.quantity:g} × {r.instance_type or r.instance_family} ({KIND_LABELS.get(r.kind, r.kind)})"
     service = SERVICE_LABELS.get(r.service or "", r.service)
-    where = ", ".join(x for x in (service, r.region) if x and r.service != "compute")
+    where = ", ".join(x for x in (service, r.region) if x and r.service not in ACCOUNT_WIDE_POOLS)
     return f"{action} {what}{' — ' + where if where else ''}"
 
 
