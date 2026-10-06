@@ -14,9 +14,9 @@ export function Overview({ summary, daily, onOpenPlan }: { summary: Summary; dai
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
         <Stat
-          label="On-demand-equivalent spend"
+          label="Commitment-eligible spend"
           value={money(summary.on_demand_equiv_monthly, { compact: true })}
-          sub={`per month · ${money(summary.on_demand_spend_monthly, { compact: true })} billed on demand`}
+          sub={`per month at on-demand rates · ${money(summary.on_demand_spend_monthly, { compact: true })} billed on demand`}
         />
         <Stat
           label="Effective savings rate"
@@ -35,7 +35,7 @@ export function Overview({ summary, daily, onOpenPlan }: { summary: Summary; dai
           sub={`per month · ${money(summary.projected_annual_savings, { compact: true })} per year`}
           emphasis
         />
-        <Stat label="Commitment coverage" value={pct(summary.coverage_pct, 0)} sub="of eligible on-demand-equivalent spend" />
+        <Stat label="Commitment coverage" value={pct(summary.coverage_pct, 0)} sub="of commitment-eligible spend" />
         <Stat
           label="Utilization of existing commitments"
           value={pct(summary.existing_utilization_pct, 0)}

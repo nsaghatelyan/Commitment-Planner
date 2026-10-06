@@ -41,7 +41,7 @@ npm run dev -- -p 3100                                 # UI: http://localhost:31
 
 The UI has no login or onboarding (it is a demo). Pick a client and risk profile in the header:
 
-- **Overview**: on-demand-equivalent spend, effective savings rate today vs after the plan,
+- **Overview**: commitment-eligible spend (at on-demand rates), effective savings rate today vs after the plan,
   projected savings, coverage, utilization of existing commitments, backtest accuracy, how
   eligible usage was paid for (daily) and the spend split by service / cloud.
 - **Purchase plan**: the ordered plan (sortable, filterable by cloud and type, CSV / XLSX
